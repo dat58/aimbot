@@ -1,0 +1,131 @@
+use std::{env, env::var, path::PathBuf};
+
+pub const SCALE_HEAD_Y: f32 = 2. / 6.;
+pub const SCALE_NECK_Y: f32 = 3. / 6.;
+pub const SCALE_CHEST_Y: f32 = 4. / 6.;
+pub const SCALE_ABDOMEN_Y: f32 = 1.;
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub serving_port: u16,
+
+    pub url: String,
+    pub screen_width: u32,
+    pub screen_height: u32,
+    pub region_top: u32,
+    pub region_left: u32,
+    pub region_width: u32,
+    pub region_height: u32,
+
+    pub model_path: PathBuf,
+    pub model_input_size: usize,
+    pub model_conf: f32,
+    pub model_iou: f32,
+    pub gpu_id: Option<i32>,
+    pub gpu_mem_limit: Option<usize>,
+    pub trt_min_shapes: String,
+    pub trt_opt_shapes: String,
+    pub trt_max_shapes: String,
+    pub trt_fp16: Option<bool>,
+    pub trt_max_partition_iterations: Option<u32>,
+    pub trt_builder_optimization_level: Option<u8>,
+    pub trt_dla_enable: Option<bool>,
+    pub trt_dla_core: Option<u32>,
+    pub trt_auxiliary_streams: Option<i8>,
+}
+
+impl Config {
+    pub fn new() -> Self {
+        let serving_port = env::var("SERVING_PORT")
+            .unwrap_or(String::from("10000"))
+            .parse::<u16>()
+            .expect("SERVING_PORT is not a valid port");
+        let url = var("URL_STREAM").expect("No URL specified");
+        let screen_width = var("SCREEN_WIDTH")
+            .unwrap_or("1920".to_string())
+            .parse::<u32>()
+            .expect("SCREEN_WIDTH is not a number");
+        let screen_height = var("SCREEN_HEIGHT")
+            .unwrap_or("1080".to_string())
+            .parse::<u32>()
+            .expect("SCREEN_HEIGHT is not a number");
+        let region_top = var("REGION_TOP")
+            .unwrap_or("0".to_string())
+            .parse::<u32>()
+            .expect("REGION_TOP is not a number");
+        let region_left = var("REGION_LEFT")
+            .unwrap_or("0".to_string())
+            .parse::<u32>()
+            .expect("REGION_LEFT is not a number");
+        let region_width = var("REGION_WIDTH")
+            .unwrap_or("0".to_string())
+            .parse::<u32>()
+            .expect("REGION_WIDTH is not a number");
+        let region_height = var("REGION_HEIGHT")
+            .unwrap_or("0".to_string())
+            .parse::<u32>()
+            .expect("REGION_HEIGHT is not a number");
+        let model_path = PathBuf::from(var("MODEL_PATH").expect("No MODEL_PATH specified"));
+        if !model_path.is_file() {
+            panic!("Model path is not a file");
+        }
+        let model_input_size = var("MODEL_INPUT_SIZE")
+            .expect("No MODEL_INPUT_SIZE specified")
+            .parse::<usize>()
+            .expect("MODEL_INPUT_SIZE is not a number");
+        let model_conf = var("MODEL_CONF")
+            .expect("No MODEL_CONF specified")
+            .parse::<f32>()
+            .expect("MODEL_CONF is not a number");
+        let model_iou = var("MODEL_IOU")
+            .expect("No MODEL_IOU specified")
+            .parse::<f32>()
+            .expect("MODEL_IOU is not a number");
+        let gpu_id = var("GPU_ID").ok().and_then(|s| s.parse::<i32>().ok());
+        let gpu_mem_limit = var("GPU_MEM_LIMIT")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok());
+        let trt_min_shapes = var("TRT_MIN_SHAPES").expect("TRT_MIN_SHAPES missing");
+        let trt_opt_shapes = var("TRT_OPT_SHAPES").expect("TRT_OPT_SHAPES missing");
+        let trt_max_shapes = var("TRT_MAX_SHAPES").expect("TRT_MAX_SHAPES missing");
+        let trt_fp16 = var("TRT_FP16").ok().and_then(|s| s.parse::<bool>().ok());
+        let trt_max_partition_iterations = var("TRT_MAX_PARTITION_ITERATIONS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok());
+        let trt_builder_optimization_level = var("TRT_BUILDER_OPTIMIZATION_LEVEL")
+            .ok()
+            .and_then(|s| s.parse::<u8>().ok());
+        let trt_dla_enable = var("TRT_DLA_ENABLE")
+            .ok()
+            .and_then(|s| s.parse::<bool>().ok());
+        let trt_dla_core = var("TRT_DLA_CORE").ok().and_then(|s| s.parse::<u32>().ok());
+        let trt_auxiliary_streams = var("TRT_AUXILIARY_STREAMS")
+            .ok()
+            .and_then(|s| s.parse::<i8>().ok());
+        Self {
+            serving_port,
+            url,
+            screen_width,
+            screen_height,
+            region_top,
+            region_left,
+            region_width,
+            region_height,
+            model_path,
+            model_input_size,
+            model_conf,
+            model_iou,
+            gpu_id,
+            gpu_mem_limit,
+            trt_min_shapes,
+            trt_opt_shapes,
+            trt_max_shapes,
+            trt_fp16,
+            trt_max_partition_iterations,
+            trt_builder_optimization_level,
+            trt_dla_enable,
+            trt_dla_core,
+            trt_auxiliary_streams,
+        }
+    }
+}

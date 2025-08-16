@@ -53,6 +53,16 @@ fn main() -> Result<()> {
     thread::spawn(move || {
         #[cfg(feature = "debug")]
         let mut count = 0;
+        #[cfg(feature = "debug")]
+        const ROOT_PATH_DEBUG: &str = "assets/debug";
+        #[cfg(feature = "debug")]
+        {
+            let path = std::path::Path::new(ROOT_PATH_DEBUG);
+            if path.is_dir() {
+                std::fs::remove_dir_all(path).unwrap();
+            }
+            std::fs::create_dir_all(path).unwrap();
+        }
         loop {
             if turn_on.load(Ordering::Relaxed) {
                 if let Some(image) = frame_queue.pop() {
@@ -84,12 +94,11 @@ fn main() -> Result<()> {
                                 )
                                 .unwrap();
                             });
-                            let filename = format!("assets/debug/{count}.jpg");
+                            let filename = format!("{ROOT_PATH_DEBUG}/{count}.jpg");
                             opencv::imgcodecs::imwrite(&filename, &image, &Default::default())
                                 .unwrap();
                             count += 1;
                         }
-
                         let bbox = bboxes.pop().unwrap();
                         let destination = match aim.mode() {
                             Mode::Head => {

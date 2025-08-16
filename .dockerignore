@@ -1,0 +1,17 @@
+target/
+.idea/
+tests/
+benches/
+assets/
+LICENSE
+Dockerfile
+Dockerfile.*
+.gitignore
+.dockerignore
+.env
+*.iml
+*.md
+log/
+*.py
+.git
+.gitattributes

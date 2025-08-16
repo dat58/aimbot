@@ -221,6 +221,7 @@ dependencies = [
  "ndarray",
  "opencv",
  "ort",
+ "rand",
  "tikv-jemallocator",
  "tracing",
  "tracing-subscriber",
@@ -1024,8 +1025,7 @@ dependencies = [
 [[package]]
 name = "makcu-rs"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e0531c3e0ae56e920d05ec4e6524269b3cad87d5e49e61265fe8420eaafecda"
+source = "git+https://github.com/dat58/makcu-rs?branch=main#8e8a21c9cec585af645fad4bfde27f966900ca42"
 dependencies = [
  "anyhow",
  "bytes",

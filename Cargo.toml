@@ -2,6 +2,7 @@
 name = "aimbot"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.86.0"
 
 [dependencies]
 opencv = { version = "0.95.1", default-features = false, features = ["imgproc", "videoio", "imgcodecs"] }

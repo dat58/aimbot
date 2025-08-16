@@ -45,7 +45,7 @@ impl StreamCapture for UDP {
             Ok(frame)
         } else {
             let error = "[Stream] unable to read from stream.";
-            tracing::error!(error);
+            tracing::error!("{}", error);
             bail!(error);
         }
     }

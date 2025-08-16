@@ -37,7 +37,7 @@ impl MouseVirtual {
         let ref_y = self.random.random_range(4..17);
         Ok(self.device.move_bezier(dx, dy, steps, ref_x, ref_y)?)
     }
-    
+
     pub fn close(&self) {
         self.device.disconnect()
     }

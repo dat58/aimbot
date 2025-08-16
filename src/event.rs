@@ -55,7 +55,11 @@ async fn event(
     }
 }
 
-pub fn start_event_listener(signal: Arc<AtomicBool>, aim_mode: AimMode, serving_port: u16) -> anyhow::Result<()> {
+pub fn start_event_listener(
+    signal: Arc<AtomicBool>,
+    aim_mode: AimMode,
+    serving_port: u16,
+) -> anyhow::Result<()> {
     actix_web::rt::System::new().block_on(async {
         let signal = web::Data::new(signal);
         let aim_mode = web::Data::new(aim_mode);

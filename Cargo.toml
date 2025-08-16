@@ -1,0 +1,27 @@
+[package]
+name = "aimbot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+opencv = { version = "0.95.1", default-features = false, features = ["imgproc", "videoio", "imgcodecs"] }
+crossbeam = { version = "0.8.4", features = ["crossbeam-queue"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+ndarray = "0.16.1"
+ort = { version = "2.0.0-rc.9", default-features = false, features = ["load-dynamic", "ndarray", "tensorrt"] }
+anyhow = "1.0.99"
+dotenv = "0.15.0"
+makcu-rs = "0.1.1"
+actix-web = "4.11.0"
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms", "background_threads"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[features]
+debug = []

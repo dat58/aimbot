@@ -4,6 +4,7 @@ pub const SCALE_HEAD_Y: f32 = 2. / 6.;
 pub const SCALE_NECK_Y: f32 = 3. / 6.;
 pub const SCALE_CHEST_Y: f32 = 4. / 6.;
 pub const SCALE_ABDOMEN_Y: f32 = 1.;
+pub const DISTANCE_SENSITIVITY: f32 = 1.07437623;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -32,6 +33,9 @@ pub struct Config {
     pub trt_dla_enable: Option<bool>,
     pub trt_dla_core: Option<u32>,
     pub trt_auxiliary_streams: Option<i8>,
+
+    pub makcu_port: String,
+    pub makcu_baud: u32,
 }
 
 impl Config {
@@ -102,6 +106,11 @@ impl Config {
         let trt_auxiliary_streams = var("TRT_AUXILIARY_STREAMS")
             .ok()
             .and_then(|s| s.parse::<i8>().ok());
+        let makcu_port = var("MAKCU_PORT").expect("No MAKCU_PORT specified");
+        let makcu_baud = var("MAKCU_BAUD")
+            .unwrap_or("115200".to_string())
+            .parse::<u32>()
+            .expect("MAKCU_BAUD is not an integer");
         Self {
             serving_port,
             url,
@@ -126,6 +135,8 @@ impl Config {
             trt_dla_enable,
             trt_dla_core,
             trt_auxiliary_streams,
+            makcu_port,
+            makcu_baud,
         }
     }
 }

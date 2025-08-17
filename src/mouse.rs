@@ -23,15 +23,15 @@ impl MouseVirtual {
     pub fn move_bezier(&mut self, dx: i32, dy: i32) -> Result<()> {
         let pixel = (dx * dx + dy * dy).isqrt();
         let steps = if pixel < 50 {
-            1
+            self.random.random_range(0..=5)
         } else if pixel < 200 {
-            self.random.random_range(3..8)
+            self.random.random_range(3..=10)
         } else if pixel < 500 {
-            self.random.random_range(6..12)
+            self.random.random_range(8..=16)
         } else if pixel < 1200 {
-            self.random.random_range(12..26)
+            self.random.random_range(14..=26)
         } else {
-            self.random.random_range(26..33)
+            self.random.random_range(20..=32)
         };
         let ref_x = self.random.random_range(4..17);
         let ref_y = self.random.random_range(4..17);

@@ -29,14 +29,7 @@ impl Model {
             TensorRTExecutionProvider::default()
                 .with_device_id(config.gpu_id.unwrap_or(0))
                 .with_engine_cache(true)
-                .with_engine_cache_path(
-                    config
-                        .model_path
-                        .clone()
-                        .into_os_string()
-                        .into_string()
-                        .unwrap(),
-                )
+                .with_engine_cache_path(config.trt_cache_dir)
                 .with_profile_min_shapes(config.trt_min_shapes)
                 .with_profile_opt_shapes(config.trt_opt_shapes)
                 .with_profile_max_shapes(config.trt_max_shapes)

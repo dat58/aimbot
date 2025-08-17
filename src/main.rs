@@ -2,7 +2,8 @@
 use aimbot::{
     aim::{AimMode, Mode},
     config::{
-        Config, DISTANCE_SENSITIVITY, SCALE_ABDOMEN_Y, SCALE_CHEST_Y, SCALE_HEAD_Y, SCALE_NECK_Y,
+        Config, DISTANCE_SENSITIVITY, SCALE_ABDOMEN_Y, SCALE_CHEST_Y, SCALE_HEAD_Y, SCALE_MIN_ZONE,
+        SCALE_NECK_Y,
     },
     event::start_event_listener,
     model::{Model, Point2f},
@@ -78,32 +79,7 @@ fn main() -> Result<()> {
                     });
                     tracing::debug!("[Model] bboxes: {:?}", bboxes);
                     if bboxes.len() > 0 {
-                        #[cfg(feature = "debug")]
-                        {
-                            let mut image = image;
-                            tracing::info!("[Model] bboxes: {:?}", bboxes);
-                            bboxes.iter().for_each(|b| {
-                                opencv::imgproc::rectangle(
-                                    &mut image,
-                                    opencv::core::Rect::new(
-                                        b.xmin() as i32,
-                                        b.ymin() as i32,
-                                        b.width() as i32,
-                                        b.height() as i32,
-                                    ),
-                                    opencv::core::Scalar::new(255., 0., 255., 0.),
-                                    2,
-                                    -1,
-                                    0,
-                                )
-                                .unwrap();
-                            });
-                            let filename = format!("{ROOT_PATH_DEBUG}/{count}.jpg");
-                            opencv::imgcodecs::imwrite(&filename, &image, &Default::default())
-                                .unwrap();
-                            count += 1;
-                        }
-                        let bbox = bboxes.pop().unwrap();
+                        let bbox = bboxes[0];
                         let (destination, min_zone) = match aim.mode() {
                             Mode::Head => {
                                 if bbox.class() == 1 {
@@ -111,7 +87,7 @@ fn main() -> Result<()> {
                                 } else {
                                     (
                                         bbox.cxcy_scale(None, Some(SCALE_HEAD_Y)),
-                                        (bbox.width() / 2.).max(bbox.height() * SCALE_HEAD_Y),
+                                        (bbox.width() / 2.).max(bbox.height() / 2. * SCALE_HEAD_Y),
                                     )
                                 }
                             }
@@ -124,7 +100,7 @@ fn main() -> Result<()> {
                                 } else {
                                     (
                                         bbox.cxcy_scale(None, Some(SCALE_NECK_Y)),
-                                        (bbox.width() / 2.).max(bbox.height() * SCALE_NECK_Y),
+                                        (bbox.width() / 2.).max(bbox.height() / 2. * SCALE_NECK_Y),
                                     )
                                 }
                             }
@@ -134,7 +110,8 @@ fn main() -> Result<()> {
                                         bbox.cxcy_scale(None, Some(SCALE_CHEST_Y / SCALE_HEAD_Y));
                                     let mut min_zone = (bbox.width() / 2.)
                                         .max(SCALE_CHEST_Y / SCALE_HEAD_Y * bbox.height() / 2.);
-                                    for bbox in bboxes {
+                                    for i in 1..bboxes.len() {
+                                        let bbox = bboxes[i];
                                         if bbox.class() == 0 {
                                             point = bbox.cxcy_scale(None, Some(SCALE_CHEST_Y));
                                             min_zone = (bbox.width() / 2.)
@@ -156,7 +133,8 @@ fn main() -> Result<()> {
                                         bbox.cxcy_scale(None, Some(SCALE_ABDOMEN_Y / SCALE_HEAD_Y));
                                     let mut min_zone = (bbox.width() / 2.)
                                         .max(SCALE_ABDOMEN_Y / SCALE_HEAD_Y * bbox.height() / 2.);
-                                    for bbox in bboxes {
+                                    for i in 1..bboxes.len() {
+                                        let bbox = bboxes[i];
                                         if bbox.class() == 0 {
                                             point = bbox.cxcy_scale(None, Some(SCALE_ABDOMEN_Y));
                                             min_zone = (bbox.width() / 2.)
@@ -174,6 +152,7 @@ fn main() -> Result<()> {
                                 }
                             }
                         };
+                        let min_zone = min_zone * SCALE_MIN_ZONE;
                         let dist = destination.l2_distance(&crosshair).sqrt();
                         if dist > min_zone {
                             let dx =
@@ -181,6 +160,45 @@ fn main() -> Result<()> {
                             let dy =
                                 ((destination.y() - crosshair.y()) * DISTANCE_SENSITIVITY) as i32;
                             mouse.move_bezier(dx, dy)?;
+                        }
+
+                        #[cfg(feature = "debug")]
+                        {
+                            let mut image = image;
+                            tracing::info!("[Model] bboxes: {:?}", bboxes);
+                            bboxes.iter().for_each(|b| {
+                                opencv::imgproc::rectangle(
+                                    &mut image,
+                                    opencv::core::Rect::new(
+                                        b.xmin() as i32,
+                                        b.ymin() as i32,
+                                        b.width() as i32,
+                                        b.height() as i32,
+                                    ),
+                                    opencv::core::Scalar::new(255., 0., 255., 0.),
+                                    2,
+                                    -1,
+                                    0,
+                                )
+                                .unwrap();
+                            });
+                            opencv::imgproc::circle(
+                                &mut image,
+                                opencv::core::Point::new(
+                                    destination.x() as i32,
+                                    destination.y() as i32,
+                                ),
+                                3,
+                                opencv::core::Scalar::new(255., 0., 0., 0.),
+                                2,
+                                -1,
+                                0,
+                            )
+                            .unwrap();
+                            let filename = format!("{ROOT_PATH_DEBUG}/{count}.jpg");
+                            opencv::imgcodecs::imwrite(&filename, &image, &Default::default())
+                                .unwrap();
+                            count += 1;
                         }
                     }
                 }

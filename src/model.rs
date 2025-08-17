@@ -163,10 +163,11 @@ impl Model {
         self.non_max_suppression(&mut bboxes);
         let post_time = post_time.elapsed();
         tracing::debug!(
-            "[Model] preprocess took: {:?}, infer took: {:?}, postprocess took: {:?}",
+            "[Model] preprocess took: {:?}, infer took: {:?}, postprocess took: {:?}, total took: {:?}",
             pre_time,
             infer_time,
-            post_time
+            post_time,
+            pre_time + infer_time + post_time,
         );
 
         Ok(bboxes)

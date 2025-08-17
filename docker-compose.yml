@@ -11,7 +11,7 @@ services:
       - ./assets/best.onnx:/app/assets/best.onnx
     environment:
       - RUST_LOG=info,aimbot=info
-      - SERVING_PORT=10000
+      - EVENT_LISTENER_PORT=10000
       - URL_STREAM=udp://172.24.36.133:4400
       - SCREEN_WIDTH=1920
       - SCREEN_HEIGHT=1080

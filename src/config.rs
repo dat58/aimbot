@@ -18,6 +18,7 @@ pub struct Config {
     pub region_width: u32,
     pub region_height: u32,
 
+    pub model_provider: String,
     pub model_path: PathBuf,
     pub model_input_size: usize,
     pub model_conf: f32,
@@ -70,6 +71,7 @@ impl Config {
             .unwrap_or("0".to_string())
             .parse::<u32>()
             .expect("REGION_HEIGHT is not a number");
+        let model_provider = var("MODEL_PROVIDER").unwrap_or("cpu".to_string());
         let model_path = PathBuf::from(var("MODEL_PATH").expect("No MODEL_PATH specified"));
         if !model_path.is_file() {
             panic!("Model path is not a file");
@@ -122,6 +124,7 @@ impl Config {
             region_left,
             region_width,
             region_height,
+            model_provider,
             model_path,
             model_input_size,
             model_conf,

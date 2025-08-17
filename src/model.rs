@@ -6,7 +6,7 @@ use opencv::{
     imgproc::{InterpolationFlags, resize},
 };
 use ort::{
-    execution_providers::TensorRTExecutionProvider,
+    execution_providers::{CPUExecutionProvider, TensorRTExecutionProvider},
     session::{Session, builder::GraphOptimizationLevel},
 };
 use std::time::Instant;
@@ -25,25 +25,36 @@ pub struct Model {
 
 impl Model {
     pub fn new(config: Config) -> Result<Self> {
-        let providers = vec![
-            TensorRTExecutionProvider::default()
-                .with_device_id(config.gpu_id.unwrap_or(0))
-                .with_engine_cache(true)
-                .with_engine_cache_path(config.trt_cache_dir)
-                .with_profile_min_shapes(config.trt_min_shapes)
-                .with_profile_opt_shapes(config.trt_opt_shapes)
-                .with_profile_max_shapes(config.trt_max_shapes)
-                .with_max_partition_iterations(config.trt_max_partition_iterations.unwrap_or(10))
-                .with_max_workspace_size(config.gpu_mem_limit.unwrap_or(1024 * 1024 * 1024))
-                .with_fp16(config.trt_fp16.unwrap_or(false))
-                // allow value from [0, 5]
-                // levels below 3 do not guarantee good engine performance, but greatly improve build time
-                .with_builder_optimization_level(config.trt_builder_optimization_level.unwrap_or(3))
-                .with_dla(config.trt_dla_enable.unwrap_or(false))
-                .with_dla_core(config.trt_dla_core.unwrap_or(0))
-                .with_auxiliary_streams(config.trt_auxiliary_streams.unwrap_or(-1))
-                .build(),
-        ];
+        let providers = match config.model_provider.as_str() {
+            "TensorRT" | "tensorrt" | "trt" => vec![
+                TensorRTExecutionProvider::default()
+                    .with_device_id(config.gpu_id.unwrap_or(0))
+                    .with_engine_cache(true)
+                    .with_engine_cache_path(config.trt_cache_dir)
+                    .with_profile_min_shapes(config.trt_min_shapes)
+                    .with_profile_opt_shapes(config.trt_opt_shapes)
+                    .with_profile_max_shapes(config.trt_max_shapes)
+                    .with_max_partition_iterations(
+                        config.trt_max_partition_iterations.unwrap_or(10),
+                    )
+                    .with_max_workspace_size(config.gpu_mem_limit.unwrap_or(1024 * 1024 * 1024))
+                    .with_fp16(config.trt_fp16.unwrap_or(false))
+                    // allow value from [0, 5]
+                    // levels below 3 do not guarantee good engine performance, but greatly improve build time
+                    .with_builder_optimization_level(
+                        config.trt_builder_optimization_level.unwrap_or(3),
+                    )
+                    .with_dla(config.trt_dla_enable.unwrap_or(false))
+                    .with_dla_core(config.trt_dla_core.unwrap_or(0))
+                    .with_auxiliary_streams(config.trt_auxiliary_streams.unwrap_or(-1))
+                    .build(),
+            ],
+            _ => vec![
+                CPUExecutionProvider::default()
+                    .with_arena_allocator()
+                    .build(),
+            ],
+        };
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_execution_providers(providers)?

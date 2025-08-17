@@ -1,5 +1,6 @@
 use crate::aim::{AimMode, Mode};
-use actix_web::{App, HttpResponse, HttpServer, Result, put, web};
+use actix_cors::Cors;
+use actix_web::{App, HttpResponse, HttpServer, Responder, Result, get, http::header, put, web};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -55,6 +56,130 @@ async fn event(
     }
 }
 
+#[get("/stream/event/board")]
+async fn board() -> impl Responder {
+    web::Html::new(String::from(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stream Event Control</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 p-6 flex items-center justify-center min-h-screen">
+
+    <div class="w-full max-w-2xl bg-gray-800 p-8 rounded-2xl shadow-2xl">
+        <!-- Main title -->
+        <h1 class="text-3xl font-bold text-center mb-8 text-blue-400">Mouse Control Panel</h1>
+
+        <!-- Status message display -->
+        <div id="status-message" class="text-center text-sm font-medium h-6 mb-4"></div>
+
+        <!-- Button grid container -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+
+            <!-- AimOff Button -->
+            <button
+                class="button-style bg-red-600 hover:bg-red-700 active:bg-red-800"
+                onclick="sendEvent('AimOff')">
+                <span class="text-lg">🔴</span> Aim Off
+            </button>
+
+            <!-- AimOn Button -->
+            <button
+                class="button-style bg-green-600 hover:bg-green-700 active:bg-green-800"
+                onclick="sendEvent('AimOn')">
+                <span class="text-lg">🟢</span> Aim On
+            </button>
+
+            <!-- AimModeHead Button -->
+            <button
+                class="button-style bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800"
+                onclick="sendEvent('AimModeHead')">
+                <span class="text-lg">👤</span> Aim Head
+            </button>
+
+            <!-- AimModeNeck Button -->
+            <button
+                class="button-style bg-purple-600 hover:bg-purple-700 active:bg-purple-800"
+                onclick="sendEvent('AimModeNeck')">
+                <span class="text-lg">👔</span> Aim Neck
+            </button>
+            
+            <!-- AimModeChest Button -->
+            <button
+                class="button-style bg-pink-600 hover:bg-pink-700 active:bg-pink-800"
+                onclick="sendEvent('AimModeChest')">
+                <span class="text-lg">🎽</span> Aim Chest
+            </button>
+
+            <!-- AimModeAbdomen Button -->
+            <button
+                class="button-style bg-yellow-600 hover:bg-yellow-700 active:bg-yellow-800"
+                onclick="sendEvent('AimModeAbdomen')">
+                <span class="text-lg">🎯</span> Aim Abdomen
+            </button>
+
+        </div>
+    </div>
+
+    <script>
+        // Dynamically get the base URL from the browser's current location.
+        // This makes the app portable and environment-agnostic.
+        const BASE_URL = `${window.location.protocol}//${window.location.host}/stream/event`;
+        
+        /**
+         * Sends a PUT request to the specified event URL without a body.
+         * @param {string} eventType The type of event to send (e.g., 'AimOn', 'AimModeHead').
+         */
+        async function sendEvent(eventType) {
+            // Get the status message element to provide feedback.
+            const statusElement = document.getElementById('status-message');
+            statusElement.className = 'text-center text-sm font-medium h-6 mb-4 text-yellow-500';
+            statusElement.textContent = `Sending event: ${eventType}...`;
+
+            try {
+                const url = `${BASE_URL}/${eventType}`;
+                const response = await fetch(url, {
+                    method: 'PUT'
+                });
+
+                if (response.ok) {
+                    // Success message.
+                    statusElement.className = 'text-center text-sm font-medium h-6 mb-4 text-green-500';
+                    statusElement.textContent = `Event '${eventType}' sent successfully!`;
+                } else {
+                    // Error message for non-200 responses.
+                    statusElement.className = 'text-center text-sm font-medium h-6 mb-4 text-red-500';
+                    statusElement.textContent = `Failed to send event. Status: ${response.status}`;
+                }
+            } catch (error) {
+                // Catch network or CORS errors.
+                statusElement.className = 'text-center text-sm font-medium h-6 mb-4 text-red-500';
+                statusElement.textContent = `Error: Could not connect to server. Please ensure the server is running at ${BASE_URL}.`;
+                console.error('Fetch error:', error);
+            }
+        }
+    </script>
+    <style>
+        .button-style {
+            @apply flex items-center justify-center p-4 rounded-xl font-bold text-white transition-all duration-200 ease-in-out transform hover:scale-105 shadow-lg;
+        }
+    </style>
+</body>
+</html>
+"#,
+    ))
+}
+
 pub fn start_event_listener(
     signal: Arc<AtomicBool>,
     aim_mode: AimMode,
@@ -65,11 +190,23 @@ pub fn start_event_listener(
         let aim_mode = web::Data::new(aim_mode);
         HttpServer::new(move || {
             App::new()
+                .wrap(
+                    Cors::default()
+                        .allow_any_origin()
+                        .allowed_headers(vec![
+                            header::AUTHORIZATION,
+                            header::ACCEPT,
+                            header::CONTENT_TYPE,
+                        ])
+                        .allowed_methods(vec!["GET", "PUT"])
+                        .max_age(3600),
+                )
                 .app_data(signal.clone())
                 .app_data(aim_mode.clone())
                 .app_data(web::PayloadConfig::default().limit(1024 * 1024))
                 .route("/health", web::get().to(HttpResponse::Ok))
                 .service(event)
+                .service(board)
         })
         .workers(1)
         .bind(format!("0.0.0.0:{serving_port}"))?

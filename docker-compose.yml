@@ -1,0 +1,35 @@
+version: '3.7'
+services:
+  aimbot:
+    image: aimbot:1.0.0
+    container_name: aimbot
+    network_mode: host
+    devices:
+      - "/dev/ttyACM0:/dev/ttyACM0"
+    volumes:
+      - ./assets:/app/assets
+      - ./assets/best.onnx:/app/assets/best.onnx
+    environment:
+      - RUST_LOG=info,aimbot=info
+      - SERVING_PORT=10000
+      - URL_STREAM=udp://172.24.36.133:4400
+      - SCREEN_WIDTH=1920
+      - SCREEN_HEIGHT=1080
+      - REGION_LEFT=832
+      - REGION_TOP=412
+      - REGION_WIDTH=256
+      - REGION_HEIGHT=256
+      - MODEL_PROVIDER=CPU
+      - MODEL_PATH=assets/best.onnx
+      - TRT_CACHE_DIR=assets
+      - MODEL_INPUT_SIZE=256
+      - MODEL_CONF=0.7
+      - MODEL_IOU=0.6
+      - TRT_MIN_SHAPES=images:1x3x256x256
+      - TRT_OPT_SHAPES=images:1x3x256x256
+      - TRT_MAX_SHAPES=images:1x3x256x256
+      - TRT_FP16=true
+      - TRT_MAX_PARTITION_ITERATIONS=10
+      - TRT_BUILDER_OPTIMIZATION_LEVEL=5
+      - MAKCU_PORT=/dev/ttyACM0
+      - MAKCU_BAUD=115200

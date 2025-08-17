@@ -1,10 +1,11 @@
 use std::{env, env::var, path::PathBuf};
 
 pub const SCALE_HEAD_Y: f32 = 2. / 6.;
-pub const SCALE_NECK_Y: f32 = 3. / 6.;
-pub const SCALE_CHEST_Y: f32 = 4. / 6.;
-pub const SCALE_ABDOMEN_Y: f32 = 1.;
-pub const DISTANCE_SENSITIVITY: f32 = 1.07437623;
+pub const SCALE_NECK_Y: f32 = 2.5 / 6.;
+pub const SCALE_CHEST_Y: f32 = 3.7 / 6.;
+pub const SCALE_ABDOMEN_Y: f32 = 5.3 / 6.;
+pub const DISTANCE_SENSITIVITY: f32 = 0.10437623;
+pub const SCALE_MIN_ZONE: f32 = 0.8;
 
 #[derive(Debug, Clone)]
 pub struct Config {

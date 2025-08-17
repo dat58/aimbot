@@ -1,4 +1,4 @@
-use std::{env, env::var, path::PathBuf};
+use std::{env::var, path::PathBuf};
 
 pub const SCALE_HEAD_Y: f32 = 2. / 6.;
 pub const SCALE_NECK_Y: f32 = 2.5 / 6.;
@@ -9,7 +9,7 @@ pub const SCALE_MIN_ZONE: f32 = 0.8;
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub serving_port: u16,
+    pub event_listener_port: u16,
 
     pub url: String,
     pub screen_width: u32,
@@ -43,10 +43,10 @@ pub struct Config {
 
 impl Config {
     pub fn new() -> Self {
-        let serving_port = env::var("SERVING_PORT")
+        let event_listener_port = var("EVENT_LISTENER_PORT")
             .unwrap_or(String::from("10000"))
             .parse::<u16>()
-            .expect("SERVING_PORT is not a valid port");
+            .expect("EVENT_LISTENER_PORT is not a valid port");
         let url = var("URL_STREAM").expect("No URL specified");
         let screen_width = var("SCREEN_WIDTH")
             .unwrap_or("1920".to_string())
@@ -117,7 +117,7 @@ impl Config {
             .parse::<u32>()
             .expect("MAKCU_BAUD is not an integer");
         Self {
-            serving_port,
+            event_listener_port,
             url,
             screen_width,
             screen_height,

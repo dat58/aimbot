@@ -40,7 +40,7 @@ fn main() -> Result<()> {
         config.screen_width as f32 / 2.,
         config.screen_height as f32 / 2.,
     );
-    let serving_port_event_listener = config.serving_port;
+    let serving_port_event_listener = config.event_listener_port;
     let udp_stream = UDP::new(config.url.as_str())?;
     let model = Model::new(config.clone())?;
     let frame_queue = Arc::new(ArrayQueue::<Mat>::new(1));
@@ -165,7 +165,6 @@ fn main() -> Result<()> {
                         #[cfg(feature = "debug")]
                         {
                             let mut image = image;
-                            tracing::info!("[Model] bboxes: {:?}", bboxes);
                             bboxes.iter().for_each(|b| {
                                 opencv::imgproc::rectangle(
                                     &mut image,

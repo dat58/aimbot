@@ -7,7 +7,10 @@ use opencv::{
         VideoCaptureTraitConst,
     },
 };
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 pub struct StreamInfo {
     pub width: u32,
@@ -18,9 +21,13 @@ pub struct StreamInfo {
 pub trait StreamCapture {
     fn capture(&mut self) -> Result<Mat>;
     fn stream_info(&self) -> Result<StreamInfo>;
+    fn reconnect(&mut self) -> Result<()>;
 }
 
-pub struct UDP(VideoCapture);
+pub struct UDP {
+    cap: VideoCapture,
+    url: String,
+}
 
 impl UDP {
     pub fn new(url: &str) -> Result<Self> {
@@ -33,40 +40,74 @@ impl UDP {
                 url
             );
         }
-        Ok(Self(cap))
+        Ok(Self {
+            cap,
+            url: url.to_string(),
+        })
     }
 }
 
 impl StreamCapture for UDP {
     fn capture(&mut self) -> Result<Mat> {
         let mut frame = Mat::default();
-        let ret = self.0.read(&mut frame)?;
+        let ret = self.cap.read(&mut frame)?;
         if ret {
             Ok(frame)
         } else {
-            let error = "[Stream] unable to read from stream.";
+            let error = "[Stream] unable to read from the stream.";
             tracing::error!("{}", error);
             bail!(error);
         }
     }
 
     fn stream_info(&self) -> Result<StreamInfo> {
-        let fps = self.0.get(CAP_PROP_FPS)? as u32;
-        let width = self.0.get(CAP_PROP_FRAME_WIDTH)? as u32;
-        let height = self.0.get(CAP_PROP_FRAME_HEIGHT)? as u32;
+        let fps = self.cap.get(CAP_PROP_FPS)? as u32;
+        let width = self.cap.get(CAP_PROP_FRAME_WIDTH)? as u32;
+        let height = self.cap.get(CAP_PROP_FRAME_HEIGHT)? as u32;
         Ok(StreamInfo { width, height, fps })
+    }
+
+    fn reconnect(&mut self) -> Result<()> {
+        let cap = VideoCapture::from_file_def(&self.url)?;
+        if !cap.is_opened()? {
+            let error = "[Stream] unable to reconnect to the stream.";
+            tracing::error!("{}", error);
+            bail!(error);
+        } else {
+            tracing::info!("[Stream] reconnect to stream at {} successfully.", self.url);
+            self.cap = cap;
+        }
+        Ok(())
     }
 }
 
-pub fn handle_capture(mut cap: Box<dyn StreamCapture>, queue: Arc<ArrayQueue<Mat>>) {
+pub fn handle_capture(
+    mut cap: Box<dyn StreamCapture>,
+    queue: Arc<ArrayQueue<Mat>>,
+    retry_time: usize,
+    retry_interval: Duration,
+) {
     loop {
         let now = Instant::now();
         if let Ok(mat) = cap.capture() {
             tracing::debug!("[Stream] captured took: {:?}", now.elapsed());
             queue.force_push(mat);
         } else {
-            tracing::debug!("[Stream] no captured & no pushed took: {:?}", now.elapsed());
-            break;
+            tracing::warn!("[Stream] unable to capture from the stream, try reconnecting...");
+            let mut reconnect_success = false;
+            for _ in 0..retry_time {
+                if cap.reconnect().is_ok() {
+                    reconnect_success = true;
+                    break;
+                }
+                std::thread::sleep(retry_interval);
+            }
+            if reconnect_success {
+                continue;
+            } else {
+                tracing::error!("[Stream] reconnect to the stream timed out, break the loop.");
+                break;
+            }
         }
     }
 }

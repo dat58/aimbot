@@ -81,7 +81,7 @@ impl MouseVirtual {
     }
 
     #[inline(always)]
-    pub fn find_bezier(&mut self, dx: i32, dy: i32) -> (i32, i32, i32) {
+    pub(crate) fn find_bezier(&mut self, dx: i32, dy: i32) -> (i32, i32, i32) {
         let pixel = (dx * dx + dy * dy).isqrt();
         let steps = if pixel < 50 {
             self.random.random_range(0..=5)

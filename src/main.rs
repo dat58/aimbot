@@ -203,7 +203,6 @@ fn main() -> Result<()> {
                 }
             }
         }
-        mouse.close();
         Ok::<(), anyhow::Error>(())
     });
     start_event_listener(signal, aim_mode, serving_port_event_listener)?;

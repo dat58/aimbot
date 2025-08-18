@@ -91,4 +91,24 @@ impl MouseVirtual {
         let ref_y = self.random.random_range(4..17);
         self.cmd(format!("km.move({dx},{dy},{steps},{ref_x},{ref_y})").as_str())
     }
+
+    /// Lock physical mouse on X-axis direction
+    pub fn lock_mx(&mut self) -> Result<()> {
+        self.cmd("km.lock_mx(1)")
+    }
+
+    /// Unlock physical mouse on X-axis direction
+    pub fn unlock_mx(&mut self) -> Result<()> {
+        self.cmd("km.lock_mx(0)")
+    }
+
+    /// Lock physical mouse on Y-axis direction
+    pub fn lock_my(&mut self) -> Result<()> {
+        self.cmd("km.lock_my(1)")
+    }
+
+    /// Unlock physical mouse on Y-axis direction
+    pub fn unlock_my(&mut self) -> Result<()> {
+        self.cmd("km.lock_my(0)")
+    }
 }

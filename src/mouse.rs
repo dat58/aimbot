@@ -10,7 +10,7 @@ const ALLOWED_BAUD_RATE: [u32; 3] = [115_200, 2_000_000, 4_000_000];
 
 pub struct MouseVirtual {
     serial: Box<dyn SerialPort>,
-    random: ThreadRng,
+    pub random: ThreadRng,
 }
 
 impl MouseVirtual {

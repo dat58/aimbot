@@ -38,15 +38,26 @@ fn main() -> Result<()> {
         config.screen_height as f32 / 2.,
     );
     let serving_port_event_listener = config.event_listener_port;
+    let makcu_port = config.makcu_port.clone();
+    let makcu_baud = config.makcu_baud;
     let udp_stream = UDP::new(config.url.as_str())?;
     let model = Model::new(config.clone())?;
     let frame_queue = Arc::new(ArrayQueue::<Mat>::new(1));
     let signal = Arc::new(AtomicBool::new(true));
     let aim_mode = AimMode::default();
+
     let capture_queue = frame_queue.clone();
+    thread::spawn(move || {
+        handle_capture(
+            Box::new(udp_stream),
+            capture_queue,
+            12,
+            std::time::Duration::from_secs(5),
+        )
+    });
+
     let turn_on = signal.clone();
     let aim = aim_mode.clone();
-
     thread::spawn(move || {
         #[cfg(feature = "debug")]
         let mut count = 0;
@@ -159,11 +170,15 @@ fn main() -> Result<()> {
         Ok::<_, anyhow::Error>(())
     });
 
-    handle_capture(
-        Box::new(udp_stream),
-        capture_queue,
-        12,
-        std::time::Duration::from_secs(5),
-    );
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    })?;
+    while running.load(Ordering::SeqCst) {
+        thread::sleep(std::time::Duration::from_millis(1000));
+    }
+    let mut mouse = MouseVirtual::new(&makcu_port, makcu_baud)?;
+    mouse.batch().unlock_mx().unlock_my().run()?;
     Ok(())
 }

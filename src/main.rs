@@ -143,13 +143,11 @@ fn main() -> Result<()> {
         Ok::<_, anyhow::Error>(())
     });
 
-    thread::spawn(move || {
-        handle_capture(
-            Box::new(udp_stream),
-            capture_queue,
-            12,
-            std::time::Duration::from_secs(5),
-        );
-    });
+    handle_capture(
+        Box::new(udp_stream),
+        capture_queue,
+        12,
+        std::time::Duration::from_secs(5),
+    );
     Ok(())
 }

@@ -39,6 +39,7 @@ pub struct Config {
 
     pub makcu_port: String,
     pub makcu_baud: u32,
+    pub makcu_mouse_lock_while_aim: bool,
 }
 
 impl Config {
@@ -116,6 +117,10 @@ impl Config {
             .unwrap_or("115200".to_string())
             .parse::<u32>()
             .expect("MAKCU_BAUD is not an integer");
+        let makcu_mouse_lock_while_aim = var("MAKCU_MOUSE_LOCK_WHILE_AIM")
+            .unwrap_or("false".to_string())
+            .parse::<bool>()
+            .expect("MAKCU_MOUSE_LOCK_WHILE_AIM is not a bool");
         Self {
             event_listener_port,
             url,
@@ -144,6 +149,7 @@ impl Config {
             trt_cache_dir,
             makcu_port,
             makcu_baud,
+            makcu_mouse_lock_while_aim,
         }
     }
 }

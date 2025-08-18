@@ -43,14 +43,10 @@ fn main() -> Result<()> {
     let frame_queue = Arc::new(ArrayQueue::<Mat>::new(1));
     let signal = Arc::new(AtomicBool::new(true));
     let aim_mode = AimMode::default();
-
     let capture_queue = frame_queue.clone();
-    thread::spawn(move || {
-        handle_capture(Box::new(udp_stream), capture_queue);
-    });
-
     let turn_on = signal.clone();
     let aim = aim_mode.clone();
+
     thread::spawn(move || {
         #[cfg(feature = "debug")]
         let mut count = 0;
@@ -141,6 +137,19 @@ fn main() -> Result<()> {
         }
         Ok::<(), anyhow::Error>(())
     });
-    start_event_listener(signal, aim_mode, serving_port_event_listener)?;
+
+    thread::spawn(move || {
+        start_event_listener(signal, aim_mode, serving_port_event_listener)?;
+        Ok::<_, anyhow::Error>(())
+    });
+
+    thread::spawn(move || {
+        handle_capture(
+            Box::new(udp_stream),
+            capture_queue,
+            12,
+            std::time::Duration::from_secs(5),
+        );
+    });
     Ok(())
 }

@@ -84,7 +84,18 @@ fn main() -> Result<()> {
                                 ((destination.x() - crosshair.x()) * DISTANCE_SENSITIVITY) as i32;
                             let dy =
                                 ((destination.y() - crosshair.y()) * DISTANCE_SENSITIVITY) as i32;
-                            mouse.move_bezier(dx, dy)?;
+                            if config.makcu_mouse_lock_while_aim {
+                                mouse
+                                    .batch()
+                                    .lock_mx()
+                                    .lock_my()
+                                    .move_bezier(dx, dy)
+                                    .unlock_mx()
+                                    .unlock_my()
+                                    .run()?;
+                            } else {
+                                mouse.move_bezier(dx, dy)?;
+                            }
                         }
 
                         #[cfg(feature = "debug")]

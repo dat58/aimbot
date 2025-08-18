@@ -97,7 +97,23 @@ fn main() -> Result<()> {
                         #[cfg(feature = "debug")]
                         {
                             let mut image = image;
-                            bboxes.iter().for_each(|b| {
+                            bboxes.class_0.iter().for_each(|b| {
+                                opencv::imgproc::rectangle(
+                                    &mut image,
+                                    opencv::core::Rect::new(
+                                        b.xmin() as i32,
+                                        b.ymin() as i32,
+                                        b.width() as i32,
+                                        b.height() as i32,
+                                    ),
+                                    opencv::core::Scalar::new(255., 255., 0., 0.),
+                                    2,
+                                    -1,
+                                    0,
+                                )
+                                .unwrap();
+                            });
+                            bboxes.class_1.iter().for_each(|b| {
                                 opencv::imgproc::rectangle(
                                     &mut image,
                                     opencv::core::Rect::new(

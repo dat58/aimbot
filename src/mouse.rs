@@ -139,14 +139,14 @@ impl<'a> BatchCommands<'a> {
 
     pub fn move_shift(mut self, dx: i32, dy: i32) -> Self {
         self.buf
-            .push_str(&format!("km.move({dx},{dy}){CRLF}").as_str());
+            .push_str(format!("km.move({dx},{dy}){CRLF}").as_str());
         self
     }
 
     pub fn move_bezier(mut self, dx: i32, dy: i32) -> Self {
         let (steps, ref_x, ref_y) = self.mouse.find_bezier(dx, dy);
         self.buf
-            .push_str(&format!("km.move({dx},{dy},{steps},{ref_x},{ref_y}){CRLF}").as_str());
+            .push_str(format!("km.move({dx},{dy},{steps},{ref_x},{ref_y}){CRLF}").as_str());
         self
     }
 

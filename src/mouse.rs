@@ -7,6 +7,7 @@ const BAUD_CHANGE_COMMAND: [u8; 9] = [0xDE, 0xAD, 0x05, 0x00, 0xA5, 0x00, 0x09, 
 const VERIFY_COMMAND: &[u8] = b"km.version()\r\n";
 const DEFAULT_BAUD_RATE: u32 = 115_200;
 const ALLOWED_BAUD_RATE: [u32; 3] = [115_200, 2_000_000, 4_000_000];
+const CRLF: &str = "\r\n";
 
 pub struct MouseVirtual {
     serial: Box<dyn SerialPort>,
@@ -67,7 +68,7 @@ impl MouseVirtual {
     fn cmd(&mut self, command: &str) -> Result<()> {
         Ok(self
             .serial
-            .write_all(format!("{}\r\n", command).as_bytes())?)
+            .write_all(format!("{command}{CRLF}").as_bytes())?)
     }
 
     pub fn move_shift(&mut self, dx: i32, dy: i32) -> Result<()> {
@@ -75,6 +76,12 @@ impl MouseVirtual {
     }
 
     pub fn move_bezier(&mut self, dx: i32, dy: i32) -> Result<()> {
+        let (steps, ref_x, ref_y) = self.find_bezier(dx, dy);
+        self.cmd(format!("km.move({dx},{dy},{steps},{ref_x},{ref_y})").as_str())
+    }
+
+    #[inline(always)]
+    pub fn find_bezier(&mut self, dx: i32, dy: i32) -> (i32, i32, i32) {
         let pixel = (dx * dx + dy * dy).isqrt();
         let steps = if pixel < 50 {
             self.random.random_range(0..=5)
@@ -89,7 +96,7 @@ impl MouseVirtual {
         };
         let ref_x = self.random.random_range(4..17);
         let ref_y = self.random.random_range(4..17);
-        self.cmd(format!("km.move({dx},{dy},{steps},{ref_x},{ref_y})").as_str())
+        (steps, ref_x, ref_y)
     }
 
     /// Lock physical mouse on X-axis direction
@@ -110,5 +117,60 @@ impl MouseVirtual {
     /// Unlock physical mouse on Y-axis direction
     pub fn unlock_my(&mut self) -> Result<()> {
         self.cmd("km.lock_my(0)")
+    }
+
+    pub fn batch(&mut self) -> BatchCommands {
+        BatchCommands::new(self)
+    }
+}
+
+pub struct BatchCommands<'a> {
+    mouse: &'a mut MouseVirtual,
+    buf: String,
+}
+
+impl<'a> BatchCommands<'a> {
+    pub fn new(mouse: &'a mut MouseVirtual) -> Self {
+        Self {
+            mouse,
+            buf: String::new(),
+        }
+    }
+
+    pub fn move_shift(mut self, dx: i32, dy: i32) -> Self {
+        self.buf
+            .push_str(&format!("km.move({dx},{dy}){CRLF}").as_str());
+        self
+    }
+
+    pub fn move_bezier(mut self, dx: i32, dy: i32) -> Self {
+        let (steps, ref_x, ref_y) = self.mouse.find_bezier(dx, dy);
+        self.buf
+            .push_str(&format!("km.move({dx},{dy},{steps},{ref_x},{ref_y}){CRLF}").as_str());
+        self
+    }
+
+    pub fn lock_mx(mut self) -> Self {
+        self.buf.push_str(format!("km.lock_mx(1){CRLF}").as_str());
+        self
+    }
+
+    pub fn unlock_mx(mut self) -> Self {
+        self.buf.push_str(format!("km.lock_mx(0){CRLF}").as_str());
+        self
+    }
+
+    pub fn lock_my(mut self) -> Self {
+        self.buf.push_str(format!("km.lock_my(1){CRLF}").as_str());
+        self
+    }
+
+    pub fn unlock_my(mut self) -> Self {
+        self.buf.push_str(format!("km.lock_my(0){CRLF}").as_str());
+        self
+    }
+
+    pub fn run(&mut self) -> Result<()> {
+        self.mouse.cmd(self.buf.as_str())
     }
 }

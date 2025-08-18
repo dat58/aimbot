@@ -1,10 +1,7 @@
 #![allow(unreachable_code)]
 use aimbot::{
-    aim::{AimMode, Mode},
-    config::{
-        Config, DISTANCE_SENSITIVITY, SCALE_ABDOMEN_Y, SCALE_CHEST_Y, SCALE_HEAD_Y, SCALE_MIN_ZONE,
-        SCALE_NECK_Y,
-    },
+    aim::AimMode,
+    config::{Config, DISTANCE_SENSITIVITY, SCALE_MIN_ZONE},
     event::start_event_listener,
     model::{Model, Point2f},
     mouse::MouseVirtual,
@@ -79,79 +76,7 @@ fn main() -> Result<()> {
                     });
                     tracing::debug!("[Model] bboxes: {:?}", bboxes);
                     if bboxes.len() > 0 {
-                        let bbox = bboxes[0];
-                        let (destination, min_zone) = match aim.mode() {
-                            Mode::Head => {
-                                if bbox.class() == 1 {
-                                    (bbox.cxcy(), (bbox.width() / 2.).max(bbox.height() / 2.))
-                                } else {
-                                    (
-                                        bbox.cxcy_scale(None, Some(SCALE_HEAD_Y)),
-                                        (bbox.width() / 2.).max(bbox.height() / 2. * SCALE_HEAD_Y),
-                                    )
-                                }
-                            }
-                            Mode::Neck => {
-                                if bbox.class() == 1 {
-                                    (
-                                        Point2f::new((bbox.xmax() - bbox.xmin()) / 2., bbox.ymax()),
-                                        (bbox.width() / 2.).max(bbox.height() / 2.),
-                                    )
-                                } else {
-                                    (
-                                        bbox.cxcy_scale(None, Some(SCALE_NECK_Y)),
-                                        (bbox.width() / 2.).max(bbox.height() / 2. * SCALE_NECK_Y),
-                                    )
-                                }
-                            }
-                            Mode::Chest => {
-                                if bbox.class() == 1 {
-                                    let mut point =
-                                        bbox.cxcy_scale(None, Some(SCALE_CHEST_Y / SCALE_HEAD_Y));
-                                    let mut min_zone = (bbox.width() / 2.)
-                                        .max(SCALE_CHEST_Y / SCALE_HEAD_Y * bbox.height() / 2.);
-                                    for i in 1..bboxes.len() {
-                                        let bbox = bboxes[i];
-                                        if bbox.class() == 0 {
-                                            point = bbox.cxcy_scale(None, Some(SCALE_CHEST_Y));
-                                            min_zone = (bbox.width() / 2.)
-                                                .max(SCALE_CHEST_Y * bbox.height() / 2.);
-                                            break;
-                                        }
-                                    }
-                                    (point, min_zone)
-                                } else {
-                                    (
-                                        bbox.cxcy_scale(None, Some(SCALE_CHEST_Y)),
-                                        (bbox.width() / 2.).max(SCALE_CHEST_Y * bbox.height() / 2.),
-                                    )
-                                }
-                            }
-                            Mode::Abdomen => {
-                                if bbox.class() == 1 {
-                                    let mut point =
-                                        bbox.cxcy_scale(None, Some(SCALE_ABDOMEN_Y / SCALE_HEAD_Y));
-                                    let mut min_zone = (bbox.width() / 2.)
-                                        .max(SCALE_ABDOMEN_Y / SCALE_HEAD_Y * bbox.height() / 2.);
-                                    for i in 1..bboxes.len() {
-                                        let bbox = bboxes[i];
-                                        if bbox.class() == 0 {
-                                            point = bbox.cxcy_scale(None, Some(SCALE_ABDOMEN_Y));
-                                            min_zone = (bbox.width() / 2.)
-                                                .max(SCALE_ABDOMEN_Y * bbox.height() / 2.);
-                                            break;
-                                        }
-                                    }
-                                    (point, min_zone)
-                                } else {
-                                    (
-                                        bbox.cxcy_scale(None, Some(SCALE_ABDOMEN_Y)),
-                                        (bbox.width() / 2.)
-                                            .max(SCALE_ABDOMEN_Y * bbox.height() / 2.),
-                                    )
-                                }
-                            }
-                        };
+                        let (destination, min_zone) = aim.aim(&bboxes).unwrap();
                         let min_zone = min_zone * SCALE_MIN_ZONE;
                         let dist = destination.l2_distance(&crosshair).sqrt();
                         if dist > min_zone {

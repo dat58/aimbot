@@ -9,6 +9,7 @@ use ort::{
     execution_providers::{CPUExecutionProvider, TensorRTExecutionProvider},
     session::{Session, builder::GraphOptimizationLevel},
 };
+use std::cmp::Ordering;
 use std::time::Instant;
 
 const CXYWH_OFFSET: usize = 4;
@@ -94,7 +95,7 @@ impl Model {
 
 impl Model {
     #[inline]
-    pub fn infer(&self, mat: &Mat) -> Result<Vec<Bbox>> {
+    pub fn infer(&self, mat: &Mat) -> Result<Bboxes> {
         // preprocess
         let pre_time = Instant::now();
         let mut inputs =
@@ -139,15 +140,15 @@ impl Model {
             .try_extract_tensor::<f32>()?
             .remove_axis(Axis(0))
             .into_dimensionality::<Ix2>()?;
-        let mut bboxes: Vec<Bbox> = Vec::new();
+        let mut bboxes = Bboxes::default();
         for pred in outputs.axis_iter(Axis(1)) {
             // confidence filter
-            let score = pred.slice(s![CXYWH_OFFSET..CXYWH_OFFSET + 1])[0];
-            if score < self.conf {
+            let scores = pred.slice(s![CXYWH_OFFSET..CXYWH_OFFSET + 2]);
+            let class = if scores[0] > scores[1] { 0 } else { 1 };
+            if scores[class] < self.conf {
                 continue;
             }
             let bbox = pred.slice(s![0..CXYWH_OFFSET]);
-            let class = pred.slice(s![CXYWH_OFFSET + 1..CXYWH_OFFSET + 2])[0] as u8;
 
             // bbox re-scale
             let cx = bbox[0] / ratio;
@@ -156,11 +157,12 @@ impl Model {
             let h = bbox[3] / ratio;
             let x = cx - w / 2. - dw as f32 / ratio + self.roi.x as f32;
             let y = cy - h / 2. - dh as f32 / ratio + self.roi.y as f32;
-            let bbox =
-                Bbox::new(x, y, w, h, score, class).bound(mat.cols() as f32, mat.rows() as f32);
-            bboxes.push(bbox);
+            let bbox = Bbox::new(x, y, w, h, scores[class], class as u8)
+                .bound(mat.cols() as f32, mat.rows() as f32);
+            bboxes.push(bbox, class);
         }
-        self.non_max_suppression(&mut bboxes);
+        self.non_max_suppression(&mut bboxes.class_0);
+        self.non_max_suppression(&mut bboxes.class_1);
         let post_time = post_time.elapsed();
         tracing::debug!(
             "[Model] preprocess took: {:?}, infer took: {:?}, postprocess took: {:?}, total took: {:?}",
@@ -366,5 +368,33 @@ impl Bbox {
             confidence: self.confidence,
             class: self.class,
         }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Bboxes {
+    pub class_0: Vec<Bbox>,
+    pub class_1: Vec<Bbox>,
+}
+
+impl Bboxes {
+    pub fn push(&mut self, bbox: Bbox, class: usize) {
+        if class == 0 {
+            self.class_0.push(bbox);
+        } else {
+            self.class_1.push(bbox);
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.class_0.len() + self.class_1.len()
+    }
+
+    pub fn sort_by<F>(&mut self, compare: F)
+    where
+        F: Fn(&Bbox, &Bbox) -> Ordering + Clone,
+    {
+        self.class_0.sort_by(compare.clone());
+        self.class_1.sort_by(compare);
     }
 }

@@ -18,7 +18,8 @@ actix-cors = "0.7.1"
 rand = "0.9.2"
 serialport = "4.7.2"
 ctrlc = "3.4.7"
-ndi = "0.1.2"
+ndi = { git = "https://github.com/dat58/ndi-rs.git", version = "0.1.2" }
+
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms", "background_threads"] }

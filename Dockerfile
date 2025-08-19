@@ -1,4 +1,4 @@
-FROM vtdat58/rust:1.86.0-cuda11.8.0-cudnn8-tensorrt8.6.1.6-onnxruntime1.21.1-opencv4.8.0-videoio-dylib AS chef
+FROM vtdat58/rust:1.86.0-cuda11.8.0-cudnn8-tensorrt8.6.1.6-onnxruntime1.21.1-opencv4.8.0-videoio-ndi-dylib AS chef
 WORKDIR /app
 
 FROM chef AS planner

@@ -11,7 +11,9 @@ pub const SCALE_MIN_ZONE: f32 = 0.8;
 pub struct Config {
     pub event_listener_port: u16,
 
-    pub url: String,
+    pub source_stream: String,
+    pub ndi_source_name: Option<String>,
+    pub ndi_timeout: std::time::Duration,
     pub screen_width: u32,
     pub screen_height: u32,
     pub region_top: u32,
@@ -48,7 +50,14 @@ impl Config {
             .unwrap_or(String::from("10000"))
             .parse::<u16>()
             .expect("EVENT_LISTENER_PORT is not a valid port");
-        let url = var("URL_STREAM").expect("No URL specified");
+        let source_stream = var("SOURCE_STREAM").expect("No SOURCE_STREAM specified");
+        let ndi_source_name = var("NDI_SOURCE_NAME").ok();
+        let ndi_timeout = std::time::Duration::from_millis(
+            var("NDI_TIMEOUT")
+                .unwrap_or(String::from("1000"))
+                .parse::<u64>()
+                .expect("NDI_TIMEOUT is not a valid integer"),
+        );
         let screen_width = var("SCREEN_WIDTH")
             .unwrap_or("1920".to_string())
             .parse::<u32>()
@@ -123,7 +132,9 @@ impl Config {
             .expect("MAKCU_MOUSE_LOCK_WHILE_AIM is not a bool");
         Self {
             event_listener_port,
-            url,
+            source_stream,
+            ndi_source_name,
+            ndi_timeout,
             screen_width,
             screen_height,
             region_top,

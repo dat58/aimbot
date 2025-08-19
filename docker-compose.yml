@@ -12,7 +12,9 @@ services:
     environment:
       - RUST_LOG=info,aimbot=info
       - EVENT_LISTENER_PORT=10000
-      - URL_STREAM=udp://172.24.36.133:4400
+      - SOURCE_STREAM=ndi://172.24.36.133
+      - NDI_SOURCE_NAME=pc1
+      - NDI_TIMEOUT=1000
       - SCREEN_WIDTH=1920
       - SCREEN_HEIGHT=1080
       - REGION_LEFT=832

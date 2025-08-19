@@ -56,7 +56,7 @@ async fn event(
     }
 }
 
-#[get("/stream/event/board")]
+#[get("/stream/board")]
 async fn board() -> impl Responder {
     web::Html::new(String::from(
         r#"<!DOCTYPE html>

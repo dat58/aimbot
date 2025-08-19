@@ -97,4 +97,4 @@ Find your Windows [IP] address by
 ipconfig
 ```
 
-From another device on the same network, access the board controller at: [http://[IP]:[LISTEN_PORT]/stream/board/event]()
+From another device on the same network, access the board controller at: [http://[IP]:[LISTEN_PORT]/stream/board]()

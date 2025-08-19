@@ -54,7 +54,7 @@ impl AimMode {
     pub fn aim_neck(&self, bboxes: &Bboxes) -> Option<(Point2f, f32)> {
         match bboxes.class_1.first() {
             Some(bbox) => Some((
-                Point2f::new((bbox.xmax() - bbox.xmin()) / 2., bbox.ymax()),
+                Point2f::new((bbox.xmax() + bbox.xmin()) / 2., bbox.ymax()),
                 (bbox.width() / 2.).max(bbox.height() / 2.),
             )),
             _ => match bboxes.class_0.first() {

@@ -89,42 +89,42 @@ async fn board() -> impl Responder {
             <!-- AimOff Button -->
             <button
                 class="button-style bg-red-600 hover:bg-red-700 active:bg-red-800"
-                onclick="sendEvent('AimOff')">
+                onclick="sendEvent('0')">
                 <span class="text-lg">🔴</span> Aim Off
             </button>
 
             <!-- AimOn Button -->
             <button
                 class="button-style bg-green-600 hover:bg-green-700 active:bg-green-800"
-                onclick="sendEvent('AimOn')">
+                onclick="sendEvent('1')">
                 <span class="text-lg">🟢</span> Aim On
             </button>
 
             <!-- AimModeHead Button -->
             <button
                 class="button-style bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800"
-                onclick="sendEvent('AimModeHead')">
+                onclick="sendEvent('2')">
                 <span class="text-lg">👤</span> Aim Head
             </button>
 
             <!-- AimModeNeck Button -->
             <button
                 class="button-style bg-purple-600 hover:bg-purple-700 active:bg-purple-800"
-                onclick="sendEvent('AimModeNeck')">
+                onclick="sendEvent('3')">
                 <span class="text-lg">👔</span> Aim Neck
             </button>
             
             <!-- AimModeChest Button -->
             <button
                 class="button-style bg-pink-600 hover:bg-pink-700 active:bg-pink-800"
-                onclick="sendEvent('AimModeChest')">
+                onclick="sendEvent('4')">
                 <span class="text-lg">🎽</span> Aim Chest
             </button>
 
             <!-- AimModeAbdomen Button -->
             <button
                 class="button-style bg-yellow-600 hover:bg-yellow-700 active:bg-yellow-800"
-                onclick="sendEvent('AimModeAbdomen')">
+                onclick="sendEvent('5')">
                 <span class="text-lg">🎯</span> Aim Abdomen
             </button>
 

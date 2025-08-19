@@ -5,7 +5,7 @@ use aimbot::{
     event::start_event_listener,
     model::{Model, Point2f},
     mouse::MouseVirtual,
-    stream::{UDP, handle_capture},
+    stream::{NDI, StreamCapture, UDP, handle_capture},
 };
 use anyhow::Result;
 use crossbeam::queue::ArrayQueue;
@@ -16,6 +16,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
+    time::Duration,
 };
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -40,21 +41,30 @@ fn main() -> Result<()> {
     let serving_port_event_listener = config.event_listener_port;
     let makcu_port = config.makcu_port.clone();
     let makcu_baud = config.makcu_baud;
-    let udp_stream = UDP::new(config.url.as_str())?;
+    let source_stream: Box<dyn StreamCapture> = if config.source_stream.starts_with("ndi://") {
+        let source_stream = config
+            .source_stream
+            .trim()
+            .split(',')
+            .into_iter()
+            .map(|source| source.trim_start_matches("ndi://"))
+            .collect::<Vec<&str>>();
+        let source_stream = source_stream.join(",");
+        Box::new(NDI::new(
+            &source_stream,
+            config.ndi_source_name.as_deref(),
+            config.ndi_timeout,
+        )?)
+    } else {
+        Box::new(UDP::new(config.source_stream.as_str())?)
+    };
     let model = Model::new(config.clone())?;
     let frame_queue = Arc::new(ArrayQueue::<Mat>::new(1));
     let signal = Arc::new(AtomicBool::new(true));
     let aim_mode = AimMode::default();
 
     let capture_queue = frame_queue.clone();
-    thread::spawn(move || {
-        handle_capture(
-            Box::new(udp_stream),
-            capture_queue,
-            12,
-            std::time::Duration::from_secs(5),
-        )
-    });
+    thread::spawn(move || handle_capture(source_stream, capture_queue, 12, Duration::from_secs(5)));
 
     let turn_on = signal.clone();
     let aim = aim_mode.clone();

@@ -16,6 +16,7 @@ WORKDIR /app
 ENV TZ=Asia/Ho_Chi_Minh \
     SSL_CERT_DIR=/etc/ssl/certs
 COPY --from=chef /release/lib/* /usr/lib
+COPY --from=chef /usr/lib/libndi.so.6 /usr/lib
 COPY --from=chef /etc/ssl/certs /etc/ssl/certs
 COPY --from=builder /app/target/release/aimbot .
 ENTRYPOINT ["./aimbot"]

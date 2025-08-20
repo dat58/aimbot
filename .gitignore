@@ -28,3 +28,4 @@ assets
 .idea
 *.xml
 *.iml
+.env

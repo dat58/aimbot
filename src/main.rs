@@ -81,7 +81,11 @@ fn main() -> Result<()> {
             }
             std::fs::create_dir_all(path).unwrap();
         }
-        let mut mouse = MouseVirtual::new(&config.makcu_port, config.makcu_baud)?;
+        let mut mouse = MouseVirtual::new(&config.makcu_port, config.makcu_baud).map_err(|e| {
+            tracing::error!("Cannot initialize mouse: {}", e);
+            e
+        })?;
+        tracing::info!("Mouse initialized");
         loop {
             if turn_on.load(Ordering::Relaxed) {
                 if let Some(image) = frame_queue.pop() {
@@ -186,7 +190,7 @@ fn main() -> Result<()> {
         r.store(false, Ordering::SeqCst);
     })?;
     while running.load(Ordering::SeqCst) {
-        thread::sleep(std::time::Duration::from_millis(1000));
+        thread::sleep(Duration::from_millis(1000));
     }
     let mut mouse = MouseVirtual::new(&makcu_port, makcu_baud)?;
     mouse.batch().unlock_mx().unlock_my().run()?;

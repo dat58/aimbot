@@ -73,6 +73,18 @@ Open Windows PowerShell as an administrator. Execute the following command, repl
 netsh interface portproxy add v4tov4 listenport=[LISTEN_PORT] listenaddress=0.0.0.0 connectport=[WSL_PORT] connectaddress=[WSL_IP]
 ```
 
+To show all forward list
+
+```shell
+netsh interface portproxy show all
+```
+
+To delete a rule:
+
+```shell
+netsh interface portproxy delete v4tov4 listenport=[LISTEN_PORT] listenaddress=[LISTEN_ADDRESS]
+```
+
 Open Windows Firewall (if necessary). If the Windows Firewall is blocking inbound connections to the [LISTEN_PORT], you will need to create an inbound rule. In PowerShell (as administrator), run:
 
 ```shell

@@ -1,0 +1,213 @@
+<!-- Scaled Value = Raw Value * (DPI / 96) * (Windows Scale / 100)   -->
+<!-- Raw Value = Scaled Value / ((DPI / 96) * (Windows Scale / 100)) -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mouse Input Scaler</title>
+  <!-- Tailwind CSS via CDN for styling -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Inter font for a clean look */
+    body {
+      font-family: 'Inter', sans-serif;
+    }
+  </style>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen p-4">
+
+  <div class="bg-white p-8 rounded-2xl shadow-xl w-full max-w-2xl border border-gray-200">
+    <h1 class="text-3xl font-extrabold text-center text-gray-800 mb-6">
+      Mouse Input Scaler
+    </h1>
+    <p class="text-center text-gray-600 mb-8">
+      Enter your raw mouse input and Windows scale to see the resulting scaled values, or
+      revert a scaled value to find the original raw input.
+    </p>
+
+    <!-- Common Inputs for both calculations -->
+    <div class="space-y-6 mb-10">
+      <div class="flex flex-col">
+        <label for="dpiInput" class="text-sm font-medium text-gray-700 mb-1">
+          Mouse DPI
+        </label>
+        <input
+          id="dpiInput"
+          type="number"
+          value="1000"
+          class="p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+        />
+      </div>
+
+      <div class="flex flex-col">
+        <label for="winScaleInput" class="text-sm font-medium text-gray-700 mb-1 flex justify-between">
+          Windows Scale: <span id="winScaleValue" class="font-bold">100%</span>
+        </label>
+        <input
+          id="winScaleInput"
+          type="range"
+          min="100"
+          max="200"
+          step="25"
+          value="100"
+          class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-500"
+        />
+      </div>
+    </div>
+    
+    <!-- Forward Calculation Section -->
+    <div class="border-b border-gray-200 pb-8 mb-8">
+      <h2 class="text-xl font-bold text-gray-800 mb-4">Raw to Scaled</h2>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div class="flex flex-col">
+          <label for="rawDxInput" class="text-sm font-medium text-gray-700 mb-1">
+            Raw Δx (e.g., from sensor)
+          </label>
+          <input
+            id="rawDxInput"
+            type="number"
+            value="100"
+            class="p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+          />
+        </div>
+        <div class="flex flex-col">
+          <label for="rawDyInput" class="text-sm font-medium text-gray-700 mb-1">
+            Raw Δy (e.g., from sensor)
+          </label>
+          <input
+            id="rawDyInput"
+            type="number"
+            value="50"
+            class="p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+          />
+        </div>
+      </div>
+      <div class="mt-6">
+        <button id="calculateScaledBtn" class="w-full bg-blue-600 text-white font-semibold py-3 px-6 rounded-lg shadow-md hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-500 focus:ring-opacity-50 transition-all duration-300 transform hover:scale-105">
+          Calculate Scaled Output
+        </button>
+      </div>
+      <div class="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="bg-blue-50 p-4 rounded-lg border border-blue-200">
+          <span class="block text-sm text-blue-800">Scaled Δx</span>
+          <span id="scaledDxOutput" class="text-2xl font-bold text-blue-900 mt-1">0</span>
+        </div>
+        <div class="bg-blue-50 p-4 rounded-lg border border-blue-200">
+          <span class="block text-sm text-blue-800">Scaled Δy</span>
+          <span id="scaledDyOutput" class="text-2xl font-bold text-blue-900 mt-1">0</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Reverse Calculation Section -->
+    <div>
+      <h2 class="text-xl font-bold text-gray-800 mb-4">Scaled to Raw</h2>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div class="flex flex-col">
+          <label for="revertScaledDxInput" class="text-sm font-medium text-gray-700 mb-1">
+            Scaled Δx (e.g., from an application)
+          </label>
+          <input
+            id="revertScaledDxInput"
+            type="number"
+            value="1666.67"
+            class="p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+          />
+        </div>
+        <div class="flex flex-col">
+          <label for="revertScaledDyInput" class="text-sm font-medium text-gray-700 mb-1">
+            Scaled Δy (e.g., from an application)
+          </label>
+          <input
+            id="revertScaledDyInput"
+            type="number"
+            value="833.33"
+            class="p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+          />
+        </div>
+      </div>
+      <div class="mt-6">
+        <button id="revertScaledBtn" class="w-full bg-blue-600 text-white font-semibold py-3 px-6 rounded-lg shadow-md hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-500 focus:ring-opacity-50 transition-all duration-300 transform hover:scale-105">
+          Revert to Raw Input
+        </button>
+      </div>
+      <div class="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="bg-blue-50 p-4 rounded-lg border border-blue-200">
+          <span class="block text-sm text-blue-800">Reverted Raw Δx</span>
+          <span id="revertedRawDxOutput" class="text-2xl font-bold text-blue-900 mt-1">0</span>
+        </div>
+        <div class="bg-blue-50 p-4 rounded-lg border border-blue-200">
+          <span class="block text-sm text-blue-800">Reverted Raw Δy</span>
+          <span id="revertedRawDyOutput" class="text-2xl font-bold text-blue-900 mt-1">0</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      // Get all necessary DOM elements
+      const dpiInput = document.getElementById('dpiInput');
+      const winScaleInput = document.getElementById('winScaleInput');
+      const winScaleValueSpan = document.getElementById('winScaleValue');
+      const rawDxInput = document.getElementById('rawDxInput');
+      const rawDyInput = document.getElementById('rawDyInput');
+      const calculateScaledBtn = document.getElementById('calculateScaledBtn');
+      const scaledDxOutput = document.getElementById('scaledDxOutput');
+      const scaledDyOutput = document.getElementById('scaledDyOutput');
+      const revertScaledDxInput = document.getElementById('revertScaledDxInput');
+      const revertScaledDyInput = document.getElementById('revertScaledDyInput');
+      const revertScaledBtn = document.getElementById('revertScaledBtn');
+      const revertedRawDxOutput = document.getElementById('revertedRawDxOutput');
+      const revertedRawDyOutput = document.getElementById('revertedRawDyOutput');
+
+      // Constants
+      const REFERENCE_DPI = 96;
+
+      // Event Listeners for UI updates
+      winScaleInput.addEventListener('input', (e) => {
+        winScaleValueSpan.textContent = `${e.target.value}%`;
+      });
+
+      // Forward Calculation Function
+      calculateScaledBtn.addEventListener('click', () => {
+        const rawDx = Number(rawDxInput.value);
+        const rawDy = Number(rawDyInput.value);
+        const dpi = Number(dpiInput.value);
+        const winScale = Number(winScaleInput.value);
+        
+        const scaleFactor = winScale / 100;
+        const newScaledDx = rawDx * (dpi / REFERENCE_DPI) * scaleFactor;
+        const newScaledDy = rawDy * (dpi / REFERENCE_DPI) * scaleFactor;
+
+        scaledDxOutput.textContent = newScaledDx.toFixed(2);
+        scaledDyOutput.textContent = newScaledDy.toFixed(2);
+      });
+
+      // Reverse Calculation Function
+      revertScaledBtn.addEventListener('click', () => {
+        const revertScaledDx = Number(revertScaledDxInput.value);
+        const revertScaledDy = Number(revertScaledDyInput.value);
+        const dpi = Number(dpiInput.value);
+        const winScale = Number(winScaleInput.value);
+        
+        if (dpi === 0 || winScale === 0) {
+          revertedRawDxOutput.textContent = "Error";
+          revertedRawDyOutput.textContent = "Error";
+          return;
+        }
+
+        const scaleFactor = winScale / 100;
+        const newRevertedRawDx = revertScaledDx / ((dpi / REFERENCE_DPI) * scaleFactor);
+        const newRevertedRawDy = revertScaledDy / ((dpi / REFERENCE_DPI) * scaleFactor);
+
+        revertedRawDxOutput.textContent = newRevertedRawDx.toFixed(2);
+        revertedRawDyOutput.textContent = newRevertedRawDy.toFixed(2);
+      });
+
+    });
+  </script>
+
+</body>
+</html>

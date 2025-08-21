@@ -1,5 +1,5 @@
 use crate::stream::{StreamCapture, StreamInfo};
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use opencv::{
     core::{CV_8UC4, Mat, Mat_AUTO_STEP},
     imgproc::{self, COLOR_RGBA2BGR},

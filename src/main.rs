@@ -1,7 +1,7 @@
 #![allow(unreachable_code)]
 use aimbot::{
     aim::AimMode,
-    config::{Config, DISTANCE_SENSITIVITY, SCALE_MIN_ZONE},
+    config::{Config, WIN_DPI_SCALE_FACTOR},
     event::start_event_listener,
     model::{Model, Point2f},
     mouse::MouseVirtual,
@@ -98,13 +98,14 @@ fn main() -> Result<()> {
                     tracing::debug!("[Model] bboxes: {:?}", bboxes);
                     if bboxes.len() > 0 {
                         let (destination, min_zone) = aim.aim(&bboxes).unwrap();
-                        let min_zone = min_zone * SCALE_MIN_ZONE;
                         let dist = destination.l2_distance(&crosshair).sqrt();
-                        if dist > min_zone {
-                            let dx =
-                                ((destination.x() - crosshair.x()) * DISTANCE_SENSITIVITY) as i32;
-                            let dy =
-                                ((destination.y() - crosshair.y()) * DISTANCE_SENSITIVITY) as i32;
+                        if dist > min_zone * config.scale_min_zone {
+                            let dx = (destination.x() - crosshair.x()) as f64
+                                * WIN_DPI_SCALE_FACTOR
+                                / config.mouse_dpi;
+                            let dy = (destination.y() - crosshair.y()) as f64
+                                * WIN_DPI_SCALE_FACTOR
+                                / config.mouse_dpi;
                             if config.makcu_mouse_lock_while_aim {
                                 mouse
                                     .batch()

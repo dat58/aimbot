@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 use rand::prelude::*;
-use serialport::{self, SerialPort};
+use serialport::{self, SerialPort, available_ports};
 use std::{thread::sleep, time::Duration};
 
 const BAUD_CHANGE_COMMAND: [u8; 9] = [0xDE, 0xAD, 0x05, 0x00, 0xA5, 0x00, 0x09, 0x3D, 0x00];
@@ -16,6 +16,7 @@ pub struct MouseVirtual {
 
 impl MouseVirtual {
     pub fn new(port: &str, baud: u32) -> Result<Self> {
+        tracing::info!("All available serial port: {:?}", available_ports());
         if !ALLOWED_BAUD_RATE.contains(&baud) {
             bail!("Baud rate out of range, allowed: {:?}", ALLOWED_BAUD_RATE);
         }

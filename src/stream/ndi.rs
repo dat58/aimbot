@@ -1,5 +1,5 @@
 use crate::stream::{StreamCapture, StreamInfo};
-use anyhow::{Result, bail, anyhow};
+use anyhow::{Result, anyhow, bail};
 use opencv::{
     core::{CV_8UC4, Mat, Mat_AUTO_STEP},
     imgproc::{self, COLOR_RGBA2BGR},
@@ -20,7 +20,7 @@ impl NDI {
         let find = ndi::FindBuilder::new()
             .extra_ips(extra_ips.to_string())
             .build()?;
-        let sources = find.current_sources(timeout.as_millis())?;
+        let sources = find.current_sources(timeout.as_millis() * 2)?;
         if sources.is_empty() {
             let error = "[Stream] unable to find sources.";
             tracing::error!("{}", error);
@@ -41,21 +41,17 @@ impl NDI {
         };
         let mut recv = ndi::RecvBuilder::new()
             .color_format(ndi::RecvColorFormat::RGBX_RGBA)
-            .bandwidth(ndi::RecvBandwidth::Lowest)
+            .bandwidth(ndi::RecvBandwidth::Highest)
             .ndi_recv_name(sources[source_index].get_name())
             .allow_video_fields(false)
             .build()?;
         recv.connect(&sources[source_index]);
-        std::thread::sleep(timeout * 2);
-        
+
         let mut video_data = None;
         let mut count = 0usize;
         let mut connected = false;
         while count < 10 {
-            let response = recv.capture_video(
-                &mut video_data,
-                timeout.as_millis() as u32,
-            );
+            let response = recv.capture_video(&mut video_data, timeout.as_millis() as u32);
             if response == ndi::FrameType::Video {
                 connected = true;
                 break;
@@ -66,7 +62,7 @@ impl NDI {
         if !connected {
             bail!("Unable to connect to the NDI.");
         }
-        
+
         tracing::info!(
             "Connected to NDI device {}",
             sources[source_index].get_name()
@@ -86,7 +82,10 @@ impl NDI {
             &mut video_data,
             timeout.unwrap_or(self.timeout).as_millis() as u32,
         );
-        video_data.ok_or_else(|| anyhow!("[Stream] failed to capture video data"))
+        match video_data {
+            Some(video_data) if !video_data.p_data().is_null() => Ok(video_data),
+            _ => bail!("Failed to capture video data"),
+        }
     }
 
     pub fn set_timeout(&mut self, timeout: Duration) {

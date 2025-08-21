@@ -71,31 +71,35 @@ impl MouseVirtual {
             .write_all(format!("{command}{CRLF}").as_bytes())?)
     }
 
-    pub fn move_shift(&mut self, dx: i32, dy: i32) -> Result<()> {
+    pub fn move_shift(&mut self, dx: f32, dy: f32) -> Result<()> {
+        let dx = dx as i32;
+        let dy = dy as i32;
         self.cmd(format!("km.move({dx},{dy})").as_str())
     }
 
-    pub fn move_bezier(&mut self, dx: i32, dy: i32) -> Result<()> {
+    pub fn move_bezier(&mut self, dx: f64, dy: f64) -> Result<()> {
         let (steps, ref_x, ref_y) = self.find_bezier(dx, dy);
         self.cmd(format!("km.move({dx},{dy},{steps},{ref_x},{ref_y})").as_str())
     }
 
     #[inline(always)]
-    pub(crate) fn find_bezier(&mut self, dx: i32, dy: i32) -> (i32, i32, i32) {
-        let pixel = (dx * dx + dy * dy).isqrt();
-        let steps = if pixel < 50 {
+    pub(crate) fn find_bezier(&mut self, dx: f64, dy: f64) -> (i32, i32, i32) {
+        let pixel = (dx * dx + dy * dy).sqrt();
+        let steps = if pixel < 20. {
+            self.random.random_range(0..=5)
+        } else if pixel < 50. {
             self.random.random_range(1..=10)
-        } else if pixel < 200 {
+        } else if pixel < 200. {
             self.random.random_range(5..=15)
-        } else if pixel < 500 {
+        } else if pixel < 500. {
             self.random.random_range(10..=20)
-        } else if pixel < 1200 {
+        } else if pixel < 1200. {
             self.random.random_range(16..=28)
         } else {
             self.random.random_range(26..=40)
         };
-        let ref_x = self.random.random_range(4..17);
-        let ref_y = self.random.random_range(4..17);
+        let ref_x = self.random.random_range(1..9);
+        let ref_y = self.random.random_range(1..9);
         (steps, ref_x, ref_y)
     }
 
@@ -137,13 +141,15 @@ impl<'a> BatchCommands<'a> {
         }
     }
 
-    pub fn move_shift(mut self, dx: i32, dy: i32) -> Self {
+    pub fn move_shift(mut self, dx: f64, dy: f64) -> Self {
+        let dx = dx as i32;
+        let dy = dy as i32;
         self.buf
             .push_str(format!("km.move({dx},{dy}){CRLF}").as_str());
         self
     }
 
-    pub fn move_bezier(mut self, dx: i32, dy: i32) -> Self {
+    pub fn move_bezier(mut self, dx: f64, dy: f64) -> Self {
         let (steps, ref_x, ref_y) = self.mouse.find_bezier(dx, dy);
         self.buf
             .push_str(format!("km.move({dx},{dy},{steps},{ref_x},{ref_y}){CRLF}").as_str());

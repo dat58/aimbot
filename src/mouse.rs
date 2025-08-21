@@ -71,7 +71,7 @@ impl MouseVirtual {
             .write_all(format!("{command}{CRLF}").as_bytes())?)
     }
 
-    pub fn move_shift(&mut self, dx: f32, dy: f32) -> Result<()> {
+    pub fn move_shift(&mut self, dx: f64, dy: f64) -> Result<()> {
         let dx = dx as i32;
         let dy = dy as i32;
         self.cmd(format!("km.move({dx},{dy})").as_str())

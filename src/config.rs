@@ -4,8 +4,7 @@ pub const SCALE_HEAD_Y: f32 = 2. / 6.;
 pub const SCALE_NECK_Y: f32 = 2.5 / 6.;
 pub const SCALE_CHEST_Y: f32 = 3.5 / 6.;
 pub const SCALE_ABDOMEN_Y: f32 = 5.1 / 6.;
-pub const DISTANCE_SENSITIVITY: f32 = 1. / 5.;
-pub const SCALE_MIN_ZONE: f32 = 0.8;
+pub const WIN_DPI_SCALE_FACTOR: f64 = 96.;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -20,6 +19,7 @@ pub struct Config {
     pub region_left: u32,
     pub region_width: u32,
     pub region_height: u32,
+    pub scale_min_zone: f32,
 
     pub model_provider: String,
     pub model_path: PathBuf,
@@ -42,6 +42,7 @@ pub struct Config {
     pub makcu_port: String,
     pub makcu_baud: u32,
     pub makcu_mouse_lock_while_aim: bool,
+    pub mouse_dpi: f64,
 }
 
 impl Config {
@@ -82,6 +83,10 @@ impl Config {
             .unwrap_or("0".to_string())
             .parse::<u32>()
             .expect("REGION_HEIGHT is not a number");
+        let scale_min_zone = var("SCALE_MIN_ZONE")
+            .unwrap_or("0.85".to_string())
+            .parse::<f32>()
+            .expect("SCALE_MIN_ZONE is not a number");
         let model_provider = var("MODEL_PROVIDER").unwrap_or("cpu".to_string());
         let model_path = PathBuf::from(var("MODEL_PATH").expect("No MODEL_PATH specified"));
         if !model_path.is_file() {
@@ -130,6 +135,10 @@ impl Config {
             .unwrap_or("false".to_string())
             .parse::<bool>()
             .expect("MAKCU_MOUSE_LOCK_WHILE_AIM is not a bool");
+        let mouse_dpi = var("MOUSE_DPI")
+            .unwrap_or("1000.".to_string())
+            .parse::<f64>()
+            .expect("MOUSE_DPI is not a number");
         Self {
             event_listener_port,
             source_stream,
@@ -141,6 +150,7 @@ impl Config {
             region_left,
             region_width,
             region_height,
+            scale_min_zone,
             model_provider,
             model_path,
             model_input_size,
@@ -161,6 +171,7 @@ impl Config {
             makcu_port,
             makcu_baud,
             makcu_mouse_lock_while_aim,
+            mouse_dpi,
         }
     }
 }

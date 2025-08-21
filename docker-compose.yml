@@ -21,6 +21,7 @@ services:
       - REGION_TOP=412
       - REGION_WIDTH=256
       - REGION_HEIGHT=256
+      - SCALE_MIN_ZONE=0.85
       - MODEL_PROVIDER=CPU
       - MODEL_PATH=assets/best.onnx
       - TRT_CACHE_DIR=assets
@@ -36,3 +37,4 @@ services:
       - MAKCU_PORT=/dev/ttyACM0
       - MAKCU_BAUD=4000000
       - MAKCU_MOUSE_LOCK_WHILE_AIM=false
+      - MOUSE_DPI=1000

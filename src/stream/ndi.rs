@@ -1,5 +1,5 @@
 use crate::stream::{StreamCapture, StreamInfo};
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, anyhow};
 use opencv::{
     core::{CV_8UC4, Mat, Mat_AUTO_STEP},
     imgproc::{self, COLOR_RGBA2BGR},
@@ -43,8 +43,30 @@ impl NDI {
             .color_format(ndi::RecvColorFormat::RGBX_RGBA)
             .bandwidth(ndi::RecvBandwidth::Lowest)
             .ndi_recv_name(sources[source_index].get_name())
+            .allow_video_fields(false)
             .build()?;
         recv.connect(&sources[source_index]);
+        std::thread::sleep(timeout * 2);
+        
+        let mut video_data = None;
+        let mut count = 0usize;
+        let mut connected = false;
+        while count < 10 {
+            let response = recv.capture_video(
+                &mut video_data,
+                timeout.as_millis() as u32,
+            );
+            if response == ndi::FrameType::Video {
+                connected = true;
+                break;
+            }
+            count += 1;
+            tracing::debug!("In a loop...{}", count);
+        }
+        if !connected {
+            bail!("Unable to connect to the NDI.");
+        }
+        
         tracing::info!(
             "Connected to NDI device {}",
             sources[source_index].get_name()
@@ -60,17 +82,11 @@ impl NDI {
 
     pub fn recv_video(&self, timeout: Option<Duration>) -> Result<ndi::VideoData> {
         let mut video_data = None;
-        let response = self.recv.capture_video(
+        self.recv.capture_video(
             &mut video_data,
             timeout.unwrap_or(self.timeout).as_millis() as u32,
         );
-        match response {
-            ndi::FrameType::Video => match video_data {
-                Some(video) => Ok(video),
-                _ => bail!("[NDI] received frame but video data is none."),
-            },
-            _ => bail!("[NDI] received unexpected response from NDI"),
-        }
+        video_data.ok_or_else(|| anyhow!("[Stream] failed to capture video data"))
     }
 
     pub fn set_timeout(&mut self, timeout: Duration) {

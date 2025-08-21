@@ -38,7 +38,10 @@ pub fn handle_capture(
                 queue.force_push(mat);
             }
             Err(e) => {
-                tracing::error!("[Stream] failed to capture next frame: {}, try reconnecting", e);
+                tracing::error!(
+                    "[Stream] {}, try reconnecting",
+                    e
+                );
                 let mut reconnect_success = false;
                 for _ in 0..retry_time {
                     if cap.reconnect().is_ok() {

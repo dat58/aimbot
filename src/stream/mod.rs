@@ -1,6 +1,6 @@
-mod ndi;
+mod ndi4;
 mod udp;
-pub use ndi::*;
+pub use ndi4::*;
 pub use udp::*;
 
 use anyhow::Result;

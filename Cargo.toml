@@ -18,9 +18,9 @@ actix-cors = "0.7.1"
 rand = "0.9.2"
 serialport = "4.7.2"
 ctrlc = "3.4.7"
-ndi = "0.1.2"
-grafton-ndi = { git = "https://github.com/dat58/ndi", branch = "hotfix-0.8.1", version = "0.8.2" }
-lazy_static = "1.5.0"
+ndi = { version = "0.1.2", optional = true }
+grafton-ndi = { git = "https://github.com/dat58/ndi", branch = "hotfix-0.8.1", version = "0.8.2", optional = true }
+lazy_static = { version = "1.5.0", optional = true }
 
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
@@ -33,3 +33,6 @@ panic = "abort"
 
 [features]
 debug = []
+ndi4 = ["dep:ndi"]
+ndi6 = ["dep:grafton-ndi", "dep:lazy_static"]
+default = ["ndi4"]

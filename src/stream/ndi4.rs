@@ -16,7 +16,7 @@ pub struct NDI4 {
 impl NDI4 {
     // Create new instance of NDI with extra IPs
     // Ex: "192.168.1.2,192.168.1.20"
-    pub fn new(extra_ips: &str, source_name: Option<&str>, timeout: Duration) -> Result<Self> {
+    pub fn new(extra_ips: &str, source_name: Option<String>, timeout: Duration) -> Result<Self> {
         let find = ndi::FindBuilder::new()
             .extra_ips(extra_ips.to_string())
             .build()?;
@@ -27,10 +27,10 @@ impl NDI4 {
             bail!(error);
         }
         let source_index = match source_name {
-            Some(source_name) => {
+            Some(ref source_name) => {
                 let mut index = 0;
                 for (i, source) in sources.iter().enumerate() {
-                    if source_name == source.get_name() {
+                    if source_name == &source.get_name() {
                         index = i;
                         break;
                     }
@@ -122,7 +122,7 @@ impl StreamCapture for NDI4 {
     }
 
     fn reconnect(&mut self) -> Result<()> {
-        let _self = Self::new(&self.extra_ips, self.source_name.as_deref(), self.timeout)?;
+        let _self = Self::new(&self.extra_ips, self.source_name.clone(), self.timeout)?;
         self.recv = _self.recv;
         Ok(())
     }

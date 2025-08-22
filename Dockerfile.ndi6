@@ -9,7 +9,7 @@ RUN --mount=src=/,dst=/artifacts,from=chef \
     cp -L /artifacts/usr/lib/x86_64-linux-gnu/libdbus-1.so.3 /release/lib && \
     cp -L /artifacts/usr/lib/x86_64-linux-gnu/libavahi-client.so.3 /release/lib && \
     cp -L /artifacts/usr/lib/x86_64-linux-gnu/libavahi-common.so.3 /release/lib && \
-    cp -L /artifacts/usr/lib/x86_64-linux-gnu/libndi.so.4 /release/lib
+    cp -L /artifacts/usr/lib/x86_64-linux-gnu/libndi.so.6 /release/lib
 
 FROM chef AS planner
 COPY . .
@@ -17,9 +17,9 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN cargo chef cook --release --no-default-features --features ndi6 --recipe-path recipe.json
 COPY . .
-RUN cargo build --release
+RUN cargo build --release --no-default-features --features ndi6
 
 FROM gcr.io/distroless/base-debian12:latest
 WORKDIR /app

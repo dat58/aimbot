@@ -6,21 +6,21 @@ use opencv::{
 };
 use std::{os::raw::c_void, time::Duration};
 
-pub struct NDI {
+pub struct NDI4 {
     extra_ips: String,
     source_name: Option<String>,
     recv: ndi::recv::Recv,
     timeout: Duration,
 }
 
-impl NDI {
+impl NDI4 {
     // Create new instance of NDI with extra IPs
     // Ex: "192.168.1.2,192.168.1.20"
     pub fn new(extra_ips: &str, source_name: Option<&str>, timeout: Duration) -> Result<Self> {
         let find = ndi::FindBuilder::new()
             .extra_ips(extra_ips.to_string())
             .build()?;
-        let sources = find.current_sources(timeout.as_millis())?;
+        let sources = find.current_sources(timeout.as_millis() * 2)?;
         if sources.is_empty() {
             let error = "[Stream] unable to find sources.";
             tracing::error!("{}", error);
@@ -41,10 +41,28 @@ impl NDI {
         };
         let mut recv = ndi::RecvBuilder::new()
             .color_format(ndi::RecvColorFormat::RGBX_RGBA)
-            .bandwidth(ndi::RecvBandwidth::Lowest)
+            .bandwidth(ndi::RecvBandwidth::Highest)
             .ndi_recv_name(sources[source_index].get_name())
+            .allow_video_fields(false)
             .build()?;
         recv.connect(&sources[source_index]);
+
+        let mut video_data = None;
+        let mut count = 0usize;
+        let mut connected = false;
+        while count < 10 {
+            let response = recv.capture_video(&mut video_data, timeout.as_millis() as u32);
+            if response == ndi::FrameType::Video {
+                connected = true;
+                break;
+            }
+            count += 1;
+            tracing::debug!("In a loop...{}", count);
+        }
+        if !connected {
+            bail!("Unable to connect to the NDI.");
+        }
+
         tracing::info!(
             "Connected to NDI device {}",
             sources[source_index].get_name()
@@ -60,16 +78,13 @@ impl NDI {
 
     pub fn recv_video(&self, timeout: Option<Duration>) -> Result<ndi::VideoData> {
         let mut video_data = None;
-        let response = self.recv.capture_video(
+        self.recv.capture_video(
             &mut video_data,
             timeout.unwrap_or(self.timeout).as_millis() as u32,
         );
-        match response {
-            ndi::FrameType::Video => match video_data {
-                Some(video) => Ok(video),
-                _ => bail!("[NDI] received frame but video data is none."),
-            },
-            _ => bail!("[NDI] received unexpected response from NDI"),
+        match video_data {
+            Some(video_data) if !video_data.p_data().is_null() => Ok(video_data),
+            _ => bail!("Failed to capture video data"),
         }
     }
 
@@ -78,7 +93,7 @@ impl NDI {
     }
 }
 
-impl StreamCapture for NDI {
+impl StreamCapture for NDI4 {
     #[inline]
     fn capture(&mut self) -> Result<Mat> {
         let video = self.recv_video(None)?;

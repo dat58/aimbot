@@ -6,14 +6,14 @@ use opencv::{
 };
 use std::{os::raw::c_void, time::Duration};
 
-pub struct NDI {
+pub struct NDI4 {
     extra_ips: String,
     source_name: Option<String>,
     recv: ndi::recv::Recv,
     timeout: Duration,
 }
 
-impl NDI {
+impl NDI4 {
     // Create new instance of NDI with extra IPs
     // Ex: "192.168.1.2,192.168.1.20"
     pub fn new(extra_ips: &str, source_name: Option<&str>, timeout: Duration) -> Result<Self> {
@@ -93,7 +93,7 @@ impl NDI {
     }
 }
 
-impl StreamCapture for NDI {
+impl StreamCapture for NDI4 {
     #[inline]
     fn capture(&mut self) -> Result<Mat> {
         let video = self.recv_video(None)?;

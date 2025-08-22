@@ -5,7 +5,7 @@ use aimbot::{
     event::start_event_listener,
     model::{Model, Point2f},
     mouse::MouseVirtual,
-    stream::{NDI4, StreamCapture, UDP, handle_capture},
+    stream::{NDI4, NDI6, StreamCapture, UDP, handle_capture},
 };
 use anyhow::Result;
 use crossbeam::queue::ArrayQueue;
@@ -53,6 +53,20 @@ fn main() -> Result<()> {
         Box::new(NDI4::new(
             &source_stream,
             config.ndi_source_name.as_deref(),
+            config.ndi_timeout,
+        )?)
+    } else if config.source_stream.starts_with("ndi6://") {
+        let source_stream = config
+            .source_stream
+            .trim()
+            .split(',')
+            .into_iter()
+            .map(|source| source.trim_start_matches("ndi6://"))
+            .collect::<Vec<&str>>();
+        let source_stream = source_stream.join(",");
+        Box::new(NDI6::new(
+            &source_stream,
+            config.ndi_source_name.clone(),
             config.ndi_timeout,
         )?)
     } else {

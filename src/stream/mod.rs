@@ -1,6 +1,9 @@
 mod ndi4;
+mod ndi6;
 mod udp;
+
 pub use ndi4::*;
+pub use ndi6::*;
 pub use udp::*;
 
 use anyhow::Result;
@@ -38,10 +41,7 @@ pub fn handle_capture(
                 queue.force_push(mat);
             }
             Err(e) => {
-                tracing::error!(
-                    "[Stream] {}, try reconnecting",
-                    e
-                );
+                tracing::error!("[Stream] {}, try reconnecting", e);
                 let mut reconnect_success = false;
                 for _ in 0..retry_time {
                     if cap.reconnect().is_ok() {

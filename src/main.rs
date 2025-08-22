@@ -5,7 +5,7 @@ use aimbot::{
     event::start_event_listener,
     model::{Model, Point2f},
     mouse::MouseVirtual,
-    stream::{NDI, StreamCapture, UDP, handle_capture},
+    stream::{NDI4, StreamCapture, UDP, handle_capture},
 };
 use anyhow::Result;
 use crossbeam::queue::ArrayQueue;
@@ -41,16 +41,16 @@ fn main() -> Result<()> {
     let serving_port_event_listener = config.event_listener_port;
     let makcu_port = config.makcu_port.clone();
     let makcu_baud = config.makcu_baud;
-    let source_stream: Box<dyn StreamCapture> = if config.source_stream.starts_with("ndi://") {
+    let source_stream: Box<dyn StreamCapture> = if config.source_stream.starts_with("ndi4://") {
         let source_stream = config
             .source_stream
             .trim()
             .split(',')
             .into_iter()
-            .map(|source| source.trim_start_matches("ndi://"))
+            .map(|source| source.trim_start_matches("ndi4://"))
             .collect::<Vec<&str>>();
         let source_stream = source_stream.join(",");
-        Box::new(NDI::new(
+        Box::new(NDI4::new(
             &source_stream,
             config.ndi_source_name.as_deref(),
             config.ndi_timeout,

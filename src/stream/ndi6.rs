@@ -61,6 +61,23 @@ impl NDI6 {
             .bandwidth(ndi::ReceiverBandwidth::Highest)
             .name(&source.name)
             .build(&NDI_CORE)?;
+
+        let mut count = 0usize;
+        let mut connected = false;
+        while count < 10 {
+            if let Some(video) = receiver.capture_video(timeout.as_millis() as u32)? {
+                if video.data.len() > 0 {
+                    connected = true;
+                    break;
+                }
+            }
+            count += 1;
+            tracing::debug!("In a loop...{}", count);
+        }
+        if !connected {
+            bail!("Unable to connect to the NDI.");
+        }
+
         tracing::info!("[NDI] connected to source: {}", source);
         Ok(Self {
             recv: receiver,
@@ -72,7 +89,7 @@ impl NDI6 {
     pub fn recv_video(&self) -> Result<ndi::VideoFrame<'_>> {
         let response = self.recv.capture_video(self.timeout.as_millis() as u32)?;
         match response {
-            Some(video) => Ok(video),
+            Some(video) if video.data.len() > 0 => Ok(video),
             _ => {
                 bail!("NDI received a response without video.");
             }

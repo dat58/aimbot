@@ -9,7 +9,6 @@ RUN --mount=src=/,dst=/artifacts,from=chef \
     cp -L /artifacts/usr/lib/x86_64-linux-gnu/libdbus-1.so.3 /release/lib && \
     cp -L /artifacts/usr/lib/x86_64-linux-gnu/libavahi-client.so.3 /release/lib && \
     cp -L /artifacts/usr/lib/x86_64-linux-gnu/libavahi-common.so.3 /release/lib && \
-    cp -L /artifacts/usr/lib/libndi.so.6 /release/lib && \
     cp -L /artifacts/usr/lib/x86_64-linux-gnu/libndi.so.4 /release/lib
 
 FROM chef AS planner

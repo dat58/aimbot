@@ -61,7 +61,9 @@ The model is defined with two classes:
 - 1: Head
 
 
-## Setup event listener
+## Setup Aimbot
+
+On your second PC, install WSL2 (Ubuntu 24.04). Then, search for and open **Turn Windows features on or off**. In the pop-up window, check the boxes for `Hyper-V` and `Virtual Machine Platform`, then click **OK**.
 
 To forward a port from a WSL instance to your Windows host, thereby making a service running in WSL accessible from Windows or even other devices on your local network, you can use the netsh interface portproxy command in Windows PowerShell.
 
@@ -91,6 +93,12 @@ Open Windows Firewall (if necessary). If the Windows Firewall is blocking inboun
 New-NetFirewallRule -DisplayName "Allow TCP on Port [LISTEN_PORT]" -Direction Inbound -Action Allow -Protocol TCP -LocalPort [LISTEN_PORT]
 ```
 
+Run the following command in PowerShell window with admin privileges to Configure Hyper-V firewall settings to allow inbound connections (Running on a side that uses WSL):
+
+```shell
+Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction Allow
+```
+
 To list all the **inbound** rule:
 
 ```shell
@@ -110,3 +118,9 @@ ipconfig
 ```
 
 From another device on the same network, access the board controller at: [http://[IP]:[LISTEN_PORT]/stream/board]()
+
+I have written a keylogger that captures keyboard and mouse presses and sends them to an event listener. You can find the code [here](https://github.com/dat58/aimbot-keylogger)
+
+Install docker engine, docker-compose, [nvidia-container-toolkit](https://gist.github.com/atinfinity/f9568aa9564371f573138712070f5bad)
+
+Set `networkingMode=mirrored` in %USER%/.wslconfig

@@ -214,6 +214,6 @@ fn main() -> Result<()> {
         let mut mouse = MouseVirtual::new(&makcu_port, makcu_baud)?;
         mouse.batch().unlock_mx().unlock_my().run()?;
     }
-    tracing::error!("Server stopped.");
+    tracing::warn!("Server stopped.");
     Ok(())
 }

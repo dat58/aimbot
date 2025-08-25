@@ -2,9 +2,12 @@ use crate::{
     config::{SCALE_ABDOMEN_Y, SCALE_CHEST_Y, SCALE_HEAD_Y, SCALE_NECK_Y},
     model::{Bboxes, Point2f},
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicU8, Ordering},
+use std::{
+    fmt::Display,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
 };
 
 pub const AIM_MODE_LENGTH: u8 = 4;
@@ -134,6 +137,17 @@ impl Into<u8> for Mode {
             Mode::Neck => 1,
             Mode::Chest => 2,
             Mode::Abdomen => 3,
+        }
+    }
+}
+
+impl Display for AimMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.mode() {
+            Mode::Head => write!(f, "Head"),
+            Mode::Neck => write!(f, "Neck"),
+            Mode::Chest => write!(f, "Chest"),
+            Mode::Abdomen => write!(f, "Abdomen"),
         }
     }
 }

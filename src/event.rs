@@ -180,6 +180,20 @@ async fn board() -> impl Responder {
     ))
 }
 
+#[get("/stream/status")]
+async fn stream_status(
+    signal: web::Data<Arc<AtomicBool>>,
+    aim_mode: web::Data<AimMode>,
+) -> Result<HttpResponse> {
+    let signal = if signal.load(Ordering::Relaxed) {
+        "On"
+    } else {
+        "Off"
+    };
+    let aim_mode = aim_mode.to_string();
+    Ok(HttpResponse::Ok().body(format!("{signal},{aim_mode}")))
+}
+
 pub fn start_event_listener(
     signal: Arc<AtomicBool>,
     aim_mode: AimMode,
@@ -207,8 +221,9 @@ pub fn start_event_listener(
                 .route("/health", web::get().to(HttpResponse::Ok))
                 .service(event)
                 .service(board)
+                .service(stream_status)
         })
-        .workers(1)
+        .workers(2)
         .bind(format!("0.0.0.0:{serving_port}"))?
         .run()
         .await?;

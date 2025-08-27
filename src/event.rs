@@ -1,4 +1,7 @@
-use crate::aim::{AimMode, Mode};
+use crate::{
+    aim::{AimMode, Mode},
+    bullet::AutoShoot,
+};
 use actix_cors::Cors;
 use actix_web::{App, HttpResponse, HttpServer, Responder, Result, get, http::header, put, web};
 use std::sync::{
@@ -184,24 +187,38 @@ async fn board() -> impl Responder {
 async fn stream_status(
     signal: web::Data<Arc<AtomicBool>>,
     aim_mode: web::Data<AimMode>,
+    auto_shoot: web::Data<AutoShoot>,
 ) -> Result<HttpResponse> {
     let signal = if signal.load(Ordering::Relaxed) {
-        "On"
+        "ON"
     } else {
-        "Off"
+        "OFF"
     };
     let aim_mode = aim_mode.to_string();
-    Ok(HttpResponse::Ok().body(format!("{signal},{aim_mode}")))
+    let bullet_count = auto_shoot.get();
+    Ok(HttpResponse::Ok().body(format!("{signal},{aim_mode},{bullet_count}")))
+}
+
+#[put("/stream/bullet/{count}")]
+async fn change_bullet(
+    count: web::Path<u32>,
+    auto_shoot: web::Data<AutoShoot>,
+) -> Result<HttpResponse> {
+    let count = count.into_inner();
+    auto_shoot.set(count);
+    Ok(HttpResponse::Ok().finish())
 }
 
 pub fn start_event_listener(
     signal: Arc<AtomicBool>,
     aim_mode: AimMode,
     serving_port: u16,
+    auto_shoot: AutoShoot,
 ) -> anyhow::Result<()> {
     actix_web::rt::System::new().block_on(async {
         let signal = web::Data::new(signal);
         let aim_mode = web::Data::new(aim_mode);
+        let auto_shoot = web::Data::new(auto_shoot);
         HttpServer::new(move || {
             App::new()
                 .wrap(
@@ -217,11 +234,13 @@ pub fn start_event_listener(
                 )
                 .app_data(signal.clone())
                 .app_data(aim_mode.clone())
+                .app_data(auto_shoot.clone())
                 .app_data(web::PayloadConfig::default().limit(1024 * 1024))
                 .route("/health", web::get().to(HttpResponse::Ok))
                 .service(event)
                 .service(board)
                 .service(stream_status)
+                .service(change_bullet)
         })
         .workers(2)
         .bind(format!("0.0.0.0:{serving_port}"))?

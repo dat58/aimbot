@@ -1,4 +1,5 @@
-#![allow(unreachable_code)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 use aimbot::{
     aim::AimMode,
     config::{Config, WIN_DPI_SCALE_FACTOR},
@@ -74,9 +75,10 @@ fn main() -> Result<()> {
 
     let turn_on = signal.clone();
     let aim = aim_mode.clone();
+    #[cfg(not(feature = "disable-mouse"))]
     let keep_running = running.clone();
     thread::spawn(move || {
-        let f = move || {
+        let f = move || -> Result<(), anyhow::Error> {
             #[cfg(feature = "debug")]
             let mut count = 0;
             #[cfg(feature = "debug")]
@@ -89,9 +91,17 @@ fn main() -> Result<()> {
                 }
                 std::fs::create_dir_all(path).unwrap();
             }
-            let mut mouse = MouseVirtual::new(&config.makcu_port, config.makcu_baud)
-                .map_err(|err| anyhow!(format!("Mouse cannot not initialized due to {}", err)))?;
-            tracing::info!("Mouse initialized");
+
+            #[cfg(not(feature = "disable-mouse"))]
+            let mut mouse = {
+                let mouse =
+                    MouseVirtual::new(&config.makcu_port, config.makcu_baud).map_err(|err| {
+                        anyhow!(format!("Mouse cannot not initialized due to {}", err))
+                    })?;
+                tracing::info!("Mouse initialized");
+                mouse
+            };
+
             loop {
                 if turn_on.load(Ordering::Relaxed) {
                     if let Some(image) = frame_queue.pop() {
@@ -102,6 +112,8 @@ fn main() -> Result<()> {
                             dist_a.partial_cmp(&dist_b).unwrap()
                         });
                         tracing::debug!("[Model] bboxes: {:?}", bboxes);
+
+                        #[cfg(not(feature = "disable-mouse"))]
                         if bboxes.len() > 0 {
                             let (destination, min_zone) = aim.aim(&bboxes).unwrap();
                             let dist = destination.l2_distance(&crosshair).sqrt();
@@ -183,10 +195,10 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            Ok::<(), anyhow::Error>(())
         };
         f().map_err(|err| {
             tracing::error!("Model inference stop due to {}", err);
+            #[cfg(not(feature = "disable-mouse"))]
             keep_running.store(false, Ordering::Relaxed);
             err
         })?;

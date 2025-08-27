@@ -32,6 +32,7 @@ codegen-units = 1
 panic = "abort"
 
 [features]
+disable-mouse = []
 debug = []
 ndi4 = ["dep:ndi"]
 ndi6 = ["dep:grafton-ndi", "dep:lazy_static"]

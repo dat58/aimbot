@@ -1,4 +1,5 @@
 pub mod aim;
+pub mod bullet;
 pub mod config;
 pub mod event;
 pub mod model;

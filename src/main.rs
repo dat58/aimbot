@@ -2,6 +2,7 @@
 #![allow(unused_imports)]
 use aimbot::{
     aim::AimMode,
+    bullet::AutoShoot,
     config::{Config, WIN_DPI_SCALE_FACTOR},
     event::start_event_listener,
     model::{Model, Point2f},
@@ -64,6 +65,7 @@ fn main() -> Result<()> {
     let signal = Arc::new(AtomicBool::new(true));
     let aim_mode = AimMode::default();
     let running = Arc::new(AtomicBool::new(true));
+    let bullet = AutoShoot::default();
 
     let capture_queue = frame_queue.clone();
     let keep_running = running.clone();
@@ -75,6 +77,7 @@ fn main() -> Result<()> {
 
     let turn_on = signal.clone();
     let aim = aim_mode.clone();
+    let auto_shoot = bullet.clone();
     #[cfg(not(feature = "disable-mouse"))]
     let keep_running = running.clone();
     thread::spawn(move || {
@@ -113,10 +116,11 @@ fn main() -> Result<()> {
                         });
                         tracing::debug!("[Model] bboxes: {:?}", bboxes);
 
-                        #[cfg(not(feature = "disable-mouse"))]
                         if bboxes.len() > 0 {
                             let (destination, min_zone) = aim.aim(&bboxes).unwrap();
                             let dist = destination.l2_distance(&crosshair).sqrt();
+
+                            #[cfg(not(feature = "disable-mouse"))]
                             if dist > min_zone * config.scale_min_zone {
                                 let dx = (destination.x() - crosshair.x()) as f64
                                     * WIN_DPI_SCALE_FACTOR
@@ -124,7 +128,7 @@ fn main() -> Result<()> {
                                 let dy = (destination.y() - crosshair.y()) as f64
                                     * WIN_DPI_SCALE_FACTOR
                                     / config.mouse_dpi;
-                                if config.makcu_mouse_lock_while_aim {
+                                let mut command = if config.makcu_mouse_lock_while_aim {
                                     mouse
                                         .batch()
                                         .lock_mx()
@@ -132,9 +136,14 @@ fn main() -> Result<()> {
                                         .move_bezier(dx, dy)
                                         .unlock_mx()
                                         .unlock_my()
-                                        .run()?;
                                 } else {
-                                    mouse.move_bezier(dx, dy)?;
+                                    mouse.batch().move_bezier(dx, dy)
+                                };
+                                if auto_shoot.enable() {
+                                    command.click_left().run()?;
+                                    auto_shoot.sub_1();
+                                } else {
+                                    command.run()?;
                                 }
                             }
 
@@ -207,11 +216,13 @@ fn main() -> Result<()> {
 
     let keep_running = running.clone();
     thread::spawn(move || {
-        start_event_listener(signal, aim_mode, serving_port_event_listener).map_err(|err| {
-            tracing::error!("Event listener stop due to {}", err);
-            keep_running.store(false, Ordering::Relaxed);
-            err
-        })?;
+        start_event_listener(signal, aim_mode, serving_port_event_listener, bullet).map_err(
+            |err| {
+                tracing::error!("Event listener stop due to {}", err);
+                keep_running.store(false, Ordering::Relaxed);
+                err
+            },
+        )?;
         Ok::<_, anyhow::Error>(())
     });
 

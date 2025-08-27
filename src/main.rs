@@ -124,9 +124,11 @@ fn main() -> Result<()> {
                             if dist > min_zone * config.scale_min_zone {
                                 let dx = (destination.x() - crosshair.x()) as f64
                                     * WIN_DPI_SCALE_FACTOR
+                                    / config.game_sens
                                     / config.mouse_dpi;
                                 let dy = (destination.y() - crosshair.y()) as f64
                                     * WIN_DPI_SCALE_FACTOR
+                                    / config.game_sens
                                     / config.mouse_dpi;
                                 let mut command = if config.makcu_mouse_lock_while_aim {
                                     mouse

@@ -23,6 +23,7 @@ async fn event(
     id: web::Path<String>,
     signal: web::Data<Arc<AtomicBool>>,
     aim_mode: web::Data<AimMode>,
+    auto_shoot: web::Data<AutoShoot>,
 ) -> Result<HttpResponse> {
     let id = id.into_inner();
     match Event::try_from(id.as_str()) {
@@ -30,6 +31,7 @@ async fn event(
             match event {
                 Event::AimOff => {
                     signal.store(false, Ordering::SeqCst);
+                    auto_shoot.set(0);
                     tracing::info!("[Event] turn off aim bot.")
                 }
                 Event::AimOn => {
@@ -206,6 +208,7 @@ async fn change_bullet(
 ) -> Result<HttpResponse> {
     let count = count.into_inner();
     auto_shoot.set(count);
+    tracing::info!("[AutoShoot] change bullet to {}.", count);
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -255,10 +258,8 @@ impl TryFrom<&str> for Event {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            "aim_off" | "aimOff" | "AimOff" | "on" | "off" | "Off" | "OFF" | "0" => {
-                Ok(Event::AimOff)
-            }
-            "aim_on" | "aimOn" | "AimOn" | "On" | "ON" | "1" => Ok(Event::AimOn),
+            "aim_off" | "aimOff" | "AimOff" | "off" | "Off" | "OFF" | "0" => Ok(Event::AimOff),
+            "aim_on" | "aimOn" | "AimOn" | "on" | "On" | "ON" | "1" => Ok(Event::AimOn),
             "aim_mode_head" | "aimModeHead" | "AimModeHead" | "head" | "Head" | "2" => {
                 Ok(Event::AimModeHead)
             }

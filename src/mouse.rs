@@ -123,11 +123,11 @@ impl MouseVirtual {
     pub fn unlock_my(&mut self) -> Result<()> {
         self.cmd("km.lock_my(0)")
     }
-    
+
     pub fn click_left(&mut self) -> Result<()> {
         self.cmd(format!("km.left(1){CRLF}km.left(0)").as_str())
     }
-    
+
     pub fn click_right(&mut self) -> Result<()> {
         self.cmd(format!("km.right(1){CRLF}km.right(0)").as_str())
     }
@@ -184,14 +184,16 @@ impl<'a> BatchCommands<'a> {
         self.buf.push_str(format!("km.lock_my(0){CRLF}").as_str());
         self
     }
-    
+
     pub fn click_left(mut self) -> Self {
-        self.buf.push_str(format!("km.left(1){CRLF}km.left(0){CRLF}").as_str());
+        self.buf
+            .push_str(format!("km.left(1){CRLF}km.left(0){CRLF}").as_str());
         self
     }
 
     pub fn click_right(mut self) -> Self {
-        self.buf.push_str(format!("km.right(1){CRLF}km.right(0){CRLF}").as_str());
+        self.buf
+            .push_str(format!("km.right(1){CRLF}km.right(0){CRLF}").as_str());
         self
     }
 

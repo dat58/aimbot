@@ -23,8 +23,8 @@ services:
       - REGION_HEIGHT=256
       - SCALE_MIN_ZONE=0.85
       - MODEL_PROVIDER=CPU
-      - MODEL_PATH=assets/best.onnx
-      - TRT_CACHE_DIR=assets
+      - MODEL_PATH=/app/assets/best.onnx
+      - TRT_CACHE_DIR=/app/assets
       - MODEL_INPUT_SIZE=256
       - MODEL_CONF=0.7
       - MODEL_IOU=0.6
@@ -38,3 +38,4 @@ services:
       - MAKCU_BAUD=4000000
       - MAKCU_MOUSE_LOCK_WHILE_AIM=false
       - MOUSE_DPI=1000
+      - GAME_SENS=1.0

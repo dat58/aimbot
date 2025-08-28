@@ -43,6 +43,7 @@ pub struct Config {
     pub makcu_baud: u32,
     pub makcu_mouse_lock_while_aim: bool,
     pub mouse_dpi: f64,
+    pub game_sens: f64,
 }
 
 impl Config {
@@ -139,6 +140,10 @@ impl Config {
             .unwrap_or("1000.".to_string())
             .parse::<f64>()
             .expect("MOUSE_DPI is not a number");
+        let game_sens = var("GAME_SENS")
+            .unwrap_or("1.".to_string())
+            .parse::<f64>()
+            .expect("GAME_SENS is not a number");
         Self {
             event_listener_port,
             source_stream,
@@ -172,6 +177,7 @@ impl Config {
             makcu_baud,
             makcu_mouse_lock_while_aim,
             mouse_dpi,
+            game_sens,
         }
     }
 }

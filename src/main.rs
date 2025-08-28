@@ -1,4 +1,5 @@
-#![allow(unreachable_code)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 use aimbot::{
     aim::AimMode,
     config::{Config, WIN_DPI_SCALE_FACTOR},
@@ -7,7 +8,7 @@ use aimbot::{
     mouse::MouseVirtual,
     stream::{NDI, StreamCapture, UDP, handle_capture},
 };
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use crossbeam::queue::ArrayQueue;
 use opencv::core::Mat;
 use std::{
@@ -62,130 +63,163 @@ fn main() -> Result<()> {
     let frame_queue = Arc::new(ArrayQueue::<Mat>::new(1));
     let signal = Arc::new(AtomicBool::new(true));
     let aim_mode = AimMode::default();
+    let running = Arc::new(AtomicBool::new(true));
 
     let capture_queue = frame_queue.clone();
-    thread::spawn(move || handle_capture(source_stream, capture_queue, 12, Duration::from_secs(5)));
+    let keep_running = running.clone();
+    thread::spawn(move || {
+        handle_capture(source_stream, capture_queue, 12, Duration::from_secs(5));
+        tracing::error!("Capture stream stopped");
+        keep_running.store(false, Ordering::Relaxed);
+    });
 
     let turn_on = signal.clone();
     let aim = aim_mode.clone();
+    #[cfg(not(feature = "disable-mouse"))]
+    let keep_running = running.clone();
     thread::spawn(move || {
-        #[cfg(feature = "debug")]
-        let mut count = 0;
-        #[cfg(feature = "debug")]
-        const ROOT_PATH_DEBUG: &str = "assets/debug";
-        #[cfg(feature = "debug")]
-        {
-            let path = std::path::Path::new(ROOT_PATH_DEBUG);
-            if path.is_dir() {
-                std::fs::remove_dir_all(path).unwrap();
+        let f = move || -> Result<(), anyhow::Error> {
+            #[cfg(feature = "debug")]
+            let mut count = 0;
+            #[cfg(feature = "debug")]
+            const ROOT_PATH_DEBUG: &str = "assets/debug";
+            #[cfg(feature = "debug")]
+            {
+                let path = std::path::Path::new(ROOT_PATH_DEBUG);
+                if path.is_dir() {
+                    std::fs::remove_dir_all(path).unwrap();
+                }
+                std::fs::create_dir_all(path).unwrap();
             }
-            std::fs::create_dir_all(path).unwrap();
-        }
-        let mut mouse = MouseVirtual::new(&config.makcu_port, config.makcu_baud).map_err(|e| {
-            tracing::error!("Cannot initialize mouse: {}", e);
-            e
-        })?;
-        tracing::info!("Mouse initialized");
-        loop {
-            if turn_on.load(Ordering::Relaxed) {
-                if let Some(image) = frame_queue.pop() {
-                    let mut bboxes = model.infer(&image)?;
-                    bboxes.sort_by(|a, b| {
-                        let dist_a = crosshair.l2_distance(&a.cxcy());
-                        let dist_b = crosshair.l2_distance(&b.cxcy());
-                        dist_a.partial_cmp(&dist_b).unwrap()
-                    });
-                    tracing::debug!("[Model] bboxes: {:?}", bboxes);
-                    if bboxes.len() > 0 {
-                        let (destination, min_zone) = aim.aim(&bboxes).unwrap();
-                        let dist = destination.l2_distance(&crosshair).sqrt();
-                        if dist > min_zone * config.scale_min_zone {
-                            let dx = (destination.x() - crosshair.x()) as f64
-                                * WIN_DPI_SCALE_FACTOR
-                                / config.mouse_dpi;
-                            let dy = (destination.y() - crosshair.y()) as f64
-                                * WIN_DPI_SCALE_FACTOR
-                                / config.mouse_dpi;
-                            if config.makcu_mouse_lock_while_aim {
-                                mouse
-                                    .batch()
-                                    .lock_mx()
-                                    .lock_my()
-                                    .move_bezier(dx, dy)
-                                    .unlock_mx()
-                                    .unlock_my()
-                                    .run()?;
-                            } else {
-                                mouse.move_bezier(dx, dy)?;
-                            }
-                        }
 
-                        #[cfg(feature = "debug")]
-                        {
-                            let mut image = image;
-                            bboxes.class_0.iter().for_each(|b| {
-                                opencv::imgproc::rectangle(
+            #[cfg(not(feature = "disable-mouse"))]
+            let mut mouse = {
+                let mouse =
+                    MouseVirtual::new(&config.makcu_port, config.makcu_baud).map_err(|err| {
+                        anyhow!(format!("Mouse cannot not initialized due to {}", err))
+                    })?;
+                tracing::info!("Mouse initialized");
+                mouse
+            };
+
+            loop {
+                if turn_on.load(Ordering::Relaxed) {
+                    if let Some(image) = frame_queue.pop() {
+                        let mut bboxes = model.infer(&image)?;
+                        bboxes.sort_by(|a, b| {
+                            let dist_a = crosshair.l2_distance(&a.cxcy());
+                            let dist_b = crosshair.l2_distance(&b.cxcy());
+                            dist_a.partial_cmp(&dist_b).unwrap()
+                        });
+                        tracing::debug!("[Model] bboxes: {:?}", bboxes);
+
+                        if bboxes.len() > 0 {
+                            let (destination, min_zone) = aim.aim(&bboxes).unwrap();
+                            let dist = destination.l2_distance(&crosshair).sqrt();
+
+                            #[cfg(not(feature = "disable-mouse"))]
+                            if dist > min_zone * config.scale_min_zone {
+                                let dx = (destination.x() - crosshair.x()) as f64
+                                    * WIN_DPI_SCALE_FACTOR
+                                    / config.game_sens
+                                    / config.mouse_dpi;
+                                let dy = (destination.y() - crosshair.y()) as f64
+                                    * WIN_DPI_SCALE_FACTOR
+                                    / config.game_sens
+                                    / config.mouse_dpi;
+                                if config.makcu_mouse_lock_while_aim {
+                                    mouse
+                                        .batch()
+                                        .lock_mx()
+                                        .lock_my()
+                                        .move_bezier(dx, dy)
+                                        .unlock_mx()
+                                        .unlock_my()
+                                        .run()?;
+                                } else {
+                                    mouse.move_bezier(dx, dy)?;
+                                };
+                            }
+
+                            #[cfg(feature = "debug")]
+                            {
+                                let mut image = image;
+                                bboxes.class_0.iter().for_each(|b| {
+                                    opencv::imgproc::rectangle(
+                                        &mut image,
+                                        opencv::core::Rect::new(
+                                            b.xmin() as i32,
+                                            b.ymin() as i32,
+                                            b.width() as i32,
+                                            b.height() as i32,
+                                        ),
+                                        opencv::core::Scalar::new(255., 255., 0., 0.),
+                                        2,
+                                        -1,
+                                        0,
+                                    )
+                                        .unwrap();
+                                });
+                                bboxes.class_1.iter().for_each(|b| {
+                                    opencv::imgproc::rectangle(
+                                        &mut image,
+                                        opencv::core::Rect::new(
+                                            b.xmin() as i32,
+                                            b.ymin() as i32,
+                                            b.width() as i32,
+                                            b.height() as i32,
+                                        ),
+                                        opencv::core::Scalar::new(255., 0., 255., 0.),
+                                        2,
+                                        -1,
+                                        0,
+                                    )
+                                        .unwrap();
+                                });
+                                opencv::imgproc::circle(
                                     &mut image,
-                                    opencv::core::Rect::new(
-                                        b.xmin() as i32,
-                                        b.ymin() as i32,
-                                        b.width() as i32,
-                                        b.height() as i32,
+                                    opencv::core::Point::new(
+                                        destination.x() as i32,
+                                        destination.y() as i32,
                                     ),
-                                    opencv::core::Scalar::new(255., 255., 0., 0.),
+                                    3,
+                                    opencv::core::Scalar::new(255., 0., 0., 0.),
                                     2,
                                     -1,
                                     0,
                                 )
-                                .unwrap();
-                            });
-                            bboxes.class_1.iter().for_each(|b| {
-                                opencv::imgproc::rectangle(
-                                    &mut image,
-                                    opencv::core::Rect::new(
-                                        b.xmin() as i32,
-                                        b.ymin() as i32,
-                                        b.width() as i32,
-                                        b.height() as i32,
-                                    ),
-                                    opencv::core::Scalar::new(255., 0., 255., 0.),
-                                    2,
-                                    -1,
-                                    0,
-                                )
-                                .unwrap();
-                            });
-                            opencv::imgproc::circle(
-                                &mut image,
-                                opencv::core::Point::new(
-                                    destination.x() as i32,
-                                    destination.y() as i32,
-                                ),
-                                3,
-                                opencv::core::Scalar::new(255., 0., 0., 0.),
-                                2,
-                                -1,
-                                0,
-                            )
-                            .unwrap();
-                            let filename = format!("{ROOT_PATH_DEBUG}/{count}.jpg");
-                            opencv::imgcodecs::imwrite(&filename, &image, &Default::default())
-                                .unwrap();
-                            count += 1;
+                                    .unwrap();
+                                let filename = format!("{ROOT_PATH_DEBUG}/{count}.jpg");
+                                opencv::imgcodecs::imwrite(&filename, &image, &Default::default())
+                                    .unwrap();
+                                count += 1;
+                            }
                         }
                     }
                 }
             }
-        }
-        Ok::<(), anyhow::Error>(())
-    });
-
-    thread::spawn(move || {
-        start_event_listener(signal, aim_mode, serving_port_event_listener)?;
+        };
+        f().map_err(|err| {
+            tracing::error!("Model inference stop due to {}", err);
+            #[cfg(not(feature = "disable-mouse"))]
+            keep_running.store(false, Ordering::Relaxed);
+            err
+        })?;
         Ok::<_, anyhow::Error>(())
     });
 
-    let running = Arc::new(AtomicBool::new(true));
+    let keep_running = running.clone();
+    thread::spawn(move || {
+        start_event_listener(signal, aim_mode, serving_port_event_listener).map_err(
+            |err| {
+                tracing::error!("Event listener stop due to {}", err);
+                keep_running.store(false, Ordering::Relaxed);
+                err
+            },
+        )?;
+        Ok::<_, anyhow::Error>(())
+    });
+
     let r = running.clone();
     ctrlc::set_handler(move || {
         r.store(false, Ordering::SeqCst);
@@ -193,7 +227,10 @@ fn main() -> Result<()> {
     while running.load(Ordering::SeqCst) {
         thread::sleep(Duration::from_millis(1000));
     }
-    let mut mouse = MouseVirtual::new(&makcu_port, makcu_baud)?;
-    mouse.batch().unlock_mx().unlock_my().run()?;
+    if config.makcu_mouse_lock_while_aim {
+        let mut mouse = MouseVirtual::new(&makcu_port, makcu_baud)?;
+        mouse.batch().unlock_mx().unlock_my().run()?;
+    }
+    tracing::warn!("Server stopped.");
     Ok(())
 }

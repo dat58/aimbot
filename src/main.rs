@@ -81,13 +81,6 @@ fn main() -> Result<()> {
     thread::spawn(move || {
         let f = move || -> Result<(), anyhow::Error> {
             #[cfg(feature = "debug")]
-            let (filename_png, filename_txt) = {
-                let id = uuid::Uuid::new_v4().to_string();
-                let filename_png = format!("d-{id}.png");
-                let filename_txt = format!("d-{id}.txt");
-                (filename_png, filename_txt)
-            };
-            #[cfg(feature = "debug")]
             const ROOT_PATH_DEBUG: &str = "assets/debug";
             #[cfg(feature = "debug")]
             {
@@ -200,6 +193,11 @@ fn main() -> Result<()> {
                                     )
                                     .unwrap();
                                 }
+                                
+                                let id = uuid::Uuid::new_v4().to_string();
+                                let filename_png = format!("d-{id}.png");
+                                let filename_txt = format!("d-{id}.txt");
+                                
                                 #[cfg(feature = "save-bbox")]
                                 {
                                     let mut txt = std::fs::File::create(format!(

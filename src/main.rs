@@ -2,7 +2,6 @@
 #![allow(unused_imports)]
 use aimbot::{
     aim::AimMode,
-    bullet::AutoShoot,
     config::{Config, WIN_DPI_SCALE_FACTOR},
     event::start_event_listener,
     model::{Model, Point2f},
@@ -65,9 +64,6 @@ fn main() -> Result<()> {
     let signal = Arc::new(AtomicBool::new(true));
     let aim_mode = AimMode::default();
     let running = Arc::new(AtomicBool::new(true));
-    let bullet = AutoShoot::default();
-    let mouse_queue_tx = Arc::new(ArrayQueue::<(f64, f64)>::new(1));
-    let mouse_queue_rx = mouse_queue_tx.clone();
 
     let capture_queue = frame_queue.clone();
     let keep_running = running.clone();
@@ -79,7 +75,6 @@ fn main() -> Result<()> {
 
     let turn_on = signal.clone();
     let aim = aim_mode.clone();
-    let auto_shoot = bullet.clone();
     #[cfg(not(feature = "disable-mouse"))]
     let keep_running = running.clone();
     thread::spawn(move || {
@@ -96,6 +91,16 @@ fn main() -> Result<()> {
                 }
                 std::fs::create_dir_all(path).unwrap();
             }
+
+            #[cfg(not(feature = "disable-mouse"))]
+            let mut mouse = {
+                let mouse =
+                    MouseVirtual::new(&config.makcu_port, config.makcu_baud).map_err(|err| {
+                        anyhow!(format!("Mouse cannot not initialized due to {}", err))
+                    })?;
+                tracing::info!("Mouse initialized");
+                mouse
+            };
 
             loop {
                 if turn_on.load(Ordering::Relaxed) {
@@ -122,7 +127,18 @@ fn main() -> Result<()> {
                                     * WIN_DPI_SCALE_FACTOR
                                     / config.game_sens
                                     / config.mouse_dpi;
-                                let _ = mouse_queue_tx.force_push((dx, dy));
+                                if config.makcu_mouse_lock_while_aim {
+                                    mouse
+                                        .batch()
+                                        .lock_mx()
+                                        .lock_my()
+                                        .move_bezier(dx, dy)
+                                        .unlock_mx()
+                                        .unlock_my()
+                                        .run()?;
+                                } else {
+                                    mouse.move_bezier(dx, dy)?;
+                                };
                             }
 
                             #[cfg(feature = "debug")]
@@ -142,7 +158,7 @@ fn main() -> Result<()> {
                                         -1,
                                         0,
                                     )
-                                    .unwrap();
+                                        .unwrap();
                                 });
                                 bboxes.class_1.iter().for_each(|b| {
                                     opencv::imgproc::rectangle(
@@ -158,7 +174,7 @@ fn main() -> Result<()> {
                                         -1,
                                         0,
                                     )
-                                    .unwrap();
+                                        .unwrap();
                                 });
                                 opencv::imgproc::circle(
                                     &mut image,
@@ -172,7 +188,7 @@ fn main() -> Result<()> {
                                     -1,
                                     0,
                                 )
-                                .unwrap();
+                                    .unwrap();
                                 let filename = format!("{ROOT_PATH_DEBUG}/{count}.jpg");
                                 opencv::imgcodecs::imwrite(&filename, &image, &Default::default())
                                     .unwrap();
@@ -194,56 +210,13 @@ fn main() -> Result<()> {
 
     let keep_running = running.clone();
     thread::spawn(move || {
-        start_event_listener(signal, aim_mode, serving_port_event_listener, bullet).map_err(
+        start_event_listener(signal, aim_mode, serving_port_event_listener).map_err(
             |err| {
                 tracing::error!("Event listener stop due to {}", err);
                 keep_running.store(false, Ordering::Relaxed);
                 err
             },
         )?;
-        Ok::<_, anyhow::Error>(())
-    });
-
-    let keep_running = running.clone();
-    thread::spawn(move || {
-        #[cfg(not(feature = "disable-mouse"))]
-        {
-            let f = move || -> Result<(), anyhow::Error> {
-                let mut mouse = {
-                    let mouse = MouseVirtual::new(&config.makcu_port, config.makcu_baud).map_err(
-                        |err| anyhow!(format!("Mouse cannot not initialized due to {}", err)),
-                    )?;
-                    tracing::info!("Mouse initialized");
-                    mouse
-                };
-                loop {
-                    if let Some((dx, dy)) = mouse_queue_rx.pop() {
-                        if config.makcu_mouse_lock_while_aim {
-                            mouse
-                                .batch()
-                                .lock_mx()
-                                .lock_my()
-                                .move_bezier(dx, dy)
-                                .unlock_mx()
-                                .unlock_my()
-                                .run()?;
-                        } else {
-                            mouse.move_bezier(dx, dy)?;
-                        };
-                        if auto_shoot.enable() {
-                            thread::sleep(Duration::from_millis(5));
-                            mouse.click_left()?;
-                            auto_shoot.sub_1();
-                        } 
-                    }
-                }
-            };
-            f().map_err(|err| {
-                tracing::error!("Mouse move stopped due to {err}");
-                keep_running.store(false, Ordering::Relaxed);
-                err
-            })?;
-        }
         Ok::<_, anyhow::Error>(())
     });
 

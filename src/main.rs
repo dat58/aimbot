@@ -207,11 +207,11 @@ fn main() -> Result<()> {
                                         bboxes.iter().for_each(|bbox| {
                                             let center = bbox.cxcy();
                                             let (x, y) = (
-                                                center.x() / image.cols() as f32,
-                                                center.y() / image.rows() as f32,
+                                                center.x() / config.screen_width as f32,
+                                                center.y() / config.screen_height as f32,
                                             );
-                                            let width = bbox.width() / image.cols() as f32;
-                                            let height = bbox.height() / image.rows() as f32;
+                                            let width = bbox.width() / config.screen_width as f32;
+                                            let height = bbox.height() / config.screen_height as f32;
                                             txt.write_all(
                                                 format!("{class} {x} {y} {width} {height}\r\n")
                                                     .as_bytes(),

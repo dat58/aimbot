@@ -193,11 +193,11 @@ fn main() -> Result<()> {
                                     )
                                     .unwrap();
                                 }
-                                
+
                                 let id = uuid::Uuid::new_v4().to_string();
                                 let filename_png = format!("d-{id}.png");
                                 let filename_txt = format!("d-{id}.txt");
-                                
+
                                 #[cfg(feature = "save-bbox")]
                                 {
                                     let mut txt = std::fs::File::create(format!(
@@ -211,7 +211,8 @@ fn main() -> Result<()> {
                                                 center.y() / config.screen_height as f32,
                                             );
                                             let width = bbox.width() / config.screen_width as f32;
-                                            let height = bbox.height() / config.screen_height as f32;
+                                            let height =
+                                                bbox.height() / config.screen_height as f32;
                                             txt.write_all(
                                                 format!("{class} {x} {y} {width} {height}\r\n")
                                                     .as_bytes(),

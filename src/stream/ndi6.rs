@@ -87,13 +87,14 @@ impl NDI6 {
     }
 
     pub fn recv_video(&self) -> Result<ndi::VideoFrame<'_>> {
-        let response = self.recv.capture_video(self.timeout.as_millis() as u32)?;
-        match response {
-            Some(video) if video.data.len() > 0 => Ok(video),
-            _ => {
-                bail!("NDI received a response without video.");
+        for _ in 0..2 {
+            let response = self.recv.capture_video(self.timeout.as_millis() as u32)?;
+            match response {
+                Some(video) if video.data.len() > 0 => return Ok(video),
+                _ => {}
             }
         }
+        bail!("NDI received a response without video.");
     }
 
     pub fn set_timeout(&mut self, timeout: Duration) {

@@ -78,14 +78,17 @@ impl NDI4 {
 
     pub fn recv_video(&self, timeout: Option<Duration>) -> Result<ndi::VideoData> {
         let mut video_data = None;
-        self.recv.capture_video(
-            &mut video_data,
-            timeout.unwrap_or(self.timeout).as_millis() as u32,
-        );
-        match video_data {
-            Some(video_data) if !video_data.p_data().is_null() => Ok(video_data),
-            _ => bail!("Failed to capture video data"),
+        for _ in 0..2 {
+            self.recv.capture_video(
+                &mut video_data,
+                timeout.unwrap_or(self.timeout).as_millis() as u32,
+            );
+            match video_data {
+                Some(video_data) if !video_data.p_data().is_null() => return Ok(video_data),
+                _ => {}
+            }
         }
+        bail!("Failed to capture video data")
     }
 
     pub fn set_timeout(&mut self, timeout: Duration) {

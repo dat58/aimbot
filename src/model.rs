@@ -6,7 +6,7 @@ use opencv::{
     imgproc::{InterpolationFlags, resize},
 };
 use ort::{
-    execution_providers::{CPUExecutionProvider, TensorRTExecutionProvider},
+    execution_providers::{CPUExecutionProvider, TensorRTExecutionProvider, MIGraphXExecutionProvider},
     session::{Session, builder::GraphOptimizationLevel},
 };
 use std::cmp::Ordering;
@@ -31,7 +31,7 @@ impl Model {
                 TensorRTExecutionProvider::default()
                     .with_device_id(config.gpu_id.unwrap_or(0))
                     .with_engine_cache(true)
-                    .with_engine_cache_path(config.trt_cache_dir)
+                    .with_engine_cache_path(config.model_cache_dir)
                     .with_profile_min_shapes(config.trt_min_shapes)
                     .with_profile_opt_shapes(config.trt_opt_shapes)
                     .with_profile_max_shapes(config.trt_max_shapes)
@@ -49,6 +49,15 @@ impl Model {
                     .with_dla_core(config.trt_dla_core.unwrap_or(0))
                     .with_auxiliary_streams(config.trt_auxiliary_streams.unwrap_or(-1))
                     .build(),
+            ],
+            "MIGRAPHX" | "migraphx" | "amd" => vec![
+                MIGraphXExecutionProvider::default()
+                    .with_device_id(config.gpu_id.unwrap_or(0))
+                    .with_exhaustive_tune(true)
+                    .with_fp16()
+                    .with_load_model(config.model_cache_dir.clone())
+                    .with_save_model(config.model_cache_dir)
+                    .build()
             ],
             _ => vec![
                 CPUExecutionProvider::default()

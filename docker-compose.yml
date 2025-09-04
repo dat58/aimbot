@@ -25,7 +25,7 @@ services:
       - SLEEP_INTERVAL_CAPTURE=2
       - MODEL_PROVIDER=CPU
       - MODEL_PATH=/app/assets/best.onnx
-      - TRT_CACHE_DIR=/app/assets
+      - MODEL_CACHE_DIR=/app/assets
       - MODEL_INPUT_SIZE=256
       - MODEL_CONF=0.7
       - MODEL_IOU=0.6

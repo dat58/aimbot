@@ -38,7 +38,7 @@ pub struct Config {
     pub trt_dla_enable: Option<bool>,
     pub trt_dla_core: Option<u32>,
     pub trt_auxiliary_streams: Option<i8>,
-    pub trt_cache_dir: String,
+    pub model_cache_dir: String,
     pub intra_threads: usize,
 
     pub makcu_port: String,
@@ -132,7 +132,7 @@ impl Config {
         let trt_auxiliary_streams = var("TRT_AUXILIARY_STREAMS")
             .ok()
             .and_then(|s| s.parse::<i8>().ok());
-        let trt_cache_dir = var("TRT_CACHE_DIR").expect("No TRT_CACHE_DIR specified");
+        let trt_cache_dir = var("MODEL_CACHE_DIR").expect("No MODEL_CACHE_DIR specified");
         let intra_threads = var("INTRA_THREADS")
             .unwrap_or("3".to_string())
             .parse::<usize>()
@@ -179,7 +179,7 @@ impl Config {
             trt_dla_enable,
             trt_dla_core,
             trt_auxiliary_streams,
-            trt_cache_dir,
+            model_cache_dir: trt_cache_dir,
             intra_threads,
             makcu_port,
             makcu_baud,

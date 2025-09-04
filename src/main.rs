@@ -124,10 +124,7 @@ async fn main() -> Result<()> {
             loop {
                 if turn_on.load(Ordering::Relaxed) {
                     if let Some(image) = frame_queue.pop() {
-                        let mut bboxes = model.infer(&image).await.map_err(|e| {
-                            tracing::error!("Failed to infer bboxes: {:?}", e);
-                            e
-                        })?;
+                        let mut bboxes = model.infer(&image).await?;
                         bboxes.sort_by(|a, b| {
                             let dist_a = crosshair.l2_distance(&a.cxcy());
                             let dist_b = crosshair.l2_distance(&b.cxcy());

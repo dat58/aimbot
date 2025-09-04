@@ -20,6 +20,7 @@ pub struct Config {
     pub region_width: u32,
     pub region_height: u32,
     pub scale_min_zone: f32,
+    pub sleep_interval_capture: Option<std::time::Duration>,
 
     pub model_provider: String,
     pub model_path: PathBuf,
@@ -41,7 +42,6 @@ pub struct Config {
 
     pub makcu_port: String,
     pub makcu_baud: u32,
-    pub makcu_mouse_lock_while_aim: bool,
     pub mouse_dpi: f64,
     pub game_sens: f64,
 }
@@ -88,6 +88,11 @@ impl Config {
             .unwrap_or("0.85".to_string())
             .parse::<f32>()
             .expect("SCALE_MIN_ZONE is not a number");
+        let sleep_interval_capture = var("SLEEP_INTERVAL_CAPTURE").ok().and_then(|v| {
+            Some(std::time::Duration::from_millis(
+                v.parse().expect("SLEEP_INTERVAL_CAPTURE is not a number"),
+            ))
+        });
         let model_provider = var("MODEL_PROVIDER").unwrap_or("cpu".to_string());
         let model_path = PathBuf::from(var("MODEL_PATH").expect("No MODEL_PATH specified"));
         if !model_path.is_file() {
@@ -132,10 +137,6 @@ impl Config {
             .unwrap_or("115200".to_string())
             .parse::<u32>()
             .expect("MAKCU_BAUD is not an integer");
-        let makcu_mouse_lock_while_aim = var("MAKCU_MOUSE_LOCK_WHILE_AIM")
-            .unwrap_or("false".to_string())
-            .parse::<bool>()
-            .expect("MAKCU_MOUSE_LOCK_WHILE_AIM is not a bool");
         let mouse_dpi = var("MOUSE_DPI")
             .unwrap_or("1000.".to_string())
             .parse::<f64>()
@@ -156,6 +157,7 @@ impl Config {
             region_width,
             region_height,
             scale_min_zone,
+            sleep_interval_capture,
             model_provider,
             model_path,
             model_input_size,
@@ -175,7 +177,6 @@ impl Config {
             trt_cache_dir,
             makcu_port,
             makcu_baud,
-            makcu_mouse_lock_while_aim,
             mouse_dpi,
             game_sens,
         }

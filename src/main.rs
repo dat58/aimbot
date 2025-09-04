@@ -245,7 +245,6 @@ async fn main() -> Result<()> {
         };
         f().await.map_err(|err| {
             tracing::error!("Model inference stop due to {}", err);
-            #[cfg(not(feature = "disable-mouse"))]
             cancel_token_child.cancel();
             err
         })?;

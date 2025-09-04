@@ -107,7 +107,6 @@ async fn main() -> Result<()> {
     let turn_on = signal.clone();
     let aim = aim_mode.clone();
     let cancel_token_child = cancel_token.clone();
-    #[cfg(not(feature = "disable-mouse"))]
     tokio::spawn(async move {
         let f = async move || -> Result<(), anyhow::Error> {
             #[cfg(feature = "debug")]
@@ -239,6 +238,8 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
+                } else {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }
         };

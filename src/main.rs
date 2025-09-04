@@ -9,7 +9,8 @@ use aimbot::{
     stream::{NDI, StreamCapture, UDP, handle_capture},
 };
 use anyhow::{Result, anyhow};
-use crossbeam::queue::ArrayQueue;
+use crossbeam::{channel, queue::ArrayQueue};
+use mimalloc::MiMalloc;
 use opencv::core::{Mat, MatTraitConst};
 use std::{
     io::Write,
@@ -20,15 +21,20 @@ use std::{
     thread,
     time::Duration,
 };
-#[cfg(not(target_env = "msvc"))]
-use tikv_jemallocator::Jemalloc;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-#[cfg(not(target_env = "msvc"))]
 #[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
+static GLOBAL: MiMalloc = MiMalloc;
 
-fn main() -> Result<()> {
+#[cfg(not(feature = "disable-mouse"))]
+struct Point {
+    pub dx: f64,
+    pub dy: f64,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
     dotenv::dotenv().ok();
     tracing_subscriber::registry()
         .with(fmt::Layer::new().with_writer(std::io::stdout).with_filter(
@@ -64,22 +70,46 @@ fn main() -> Result<()> {
     let frame_queue = Arc::new(ArrayQueue::<Mat>::new(1));
     let signal = Arc::new(AtomicBool::new(true));
     let aim_mode = AimMode::default();
-    let running = Arc::new(AtomicBool::new(true));
+    let cancel_token = CancellationToken::new();
+    #[cfg(not(feature = "disable-mouse"))]
+    let (mouse_tx, mouse_rx) = channel::bounded::<Point>(16);
 
     let capture_queue = frame_queue.clone();
-    let keep_running = running.clone();
+    let cancel_token_child = cancel_token.clone();
+    let sleep_interval_capture = config.sleep_interval_capture;
     thread::spawn(move || {
-        handle_capture(source_stream, capture_queue, 12, Duration::from_secs(5));
-        tracing::error!("Capture stream stopped");
-        keep_running.store(false, Ordering::Relaxed);
+        handle_capture(
+            source_stream,
+            capture_queue,
+            12,
+            Duration::from_secs(5),
+            sleep_interval_capture,
+        );
+        tracing::error!("Capture stream stopped.");
+        cancel_token_child.cancel();
     });
+
+    #[cfg(not(feature = "disable-mouse"))]
+    {
+        let cancel_token_child = cancel_token.clone();
+        thread::spawn(move || -> Result<()> {
+            let mut mouse = MouseVirtual::new(&config.makcu_port, config.makcu_baud)
+                .map_err(|err| anyhow!(format!("Mouse cannot not initialized due to {}", err)))?;
+            tracing::info!("Mouse initialized");
+            while let Ok(point) = mouse_rx.recv() {
+                mouse.move_bezier(point.dx, point.dy)?;
+            }
+            cancel_token_child.cancel();
+            Ok(())
+        });
+    }
 
     let turn_on = signal.clone();
     let aim = aim_mode.clone();
+    let cancel_token_child = cancel_token.clone();
     #[cfg(not(feature = "disable-mouse"))]
-    let keep_running = running.clone();
-    thread::spawn(move || {
-        let f = move || -> Result<(), anyhow::Error> {
+    tokio::spawn(async move {
+        let f = async move || -> Result<(), anyhow::Error> {
             #[cfg(feature = "debug")]
             const ROOT_PATH_DEBUG: &str = "assets/debug";
             #[cfg(feature = "debug")]
@@ -91,20 +121,13 @@ fn main() -> Result<()> {
                 std::fs::create_dir_all(path).unwrap();
             }
 
-            #[cfg(not(feature = "disable-mouse"))]
-            let mut mouse = {
-                let mouse =
-                    MouseVirtual::new(&config.makcu_port, config.makcu_baud).map_err(|err| {
-                        anyhow!(format!("Mouse cannot not initialized due to {}", err))
-                    })?;
-                tracing::info!("Mouse initialized");
-                mouse
-            };
-
             loop {
                 if turn_on.load(Ordering::Relaxed) {
                     if let Some(image) = frame_queue.pop() {
-                        let mut bboxes = model.infer(&image)?;
+                        let mut bboxes = model.infer(&image).await.map_err(|e| {
+                            tracing::error!("Failed to infer bboxes: {:?}", e);
+                            e
+                        })?;
                         bboxes.sort_by(|a, b| {
                             let dist_a = crosshair.l2_distance(&a.cxcy());
                             let dist_b = crosshair.l2_distance(&b.cxcy());
@@ -126,18 +149,7 @@ fn main() -> Result<()> {
                                     * WIN_DPI_SCALE_FACTOR
                                     / config.game_sens
                                     / config.mouse_dpi;
-                                if config.makcu_mouse_lock_while_aim {
-                                    mouse
-                                        .batch()
-                                        .lock_mx()
-                                        .lock_my()
-                                        .move_bezier(dx, dy)
-                                        .unlock_mx()
-                                        .unlock_my()
-                                        .run()?;
-                                } else {
-                                    mouse.move_bezier(dx, dy)?;
-                                };
+                                mouse_tx.send(Point { dx, dy })?;
                             }
 
                             #[cfg(feature = "debug")]
@@ -233,36 +245,15 @@ fn main() -> Result<()> {
                 }
             }
         };
-        f().map_err(|err| {
+        f().await.map_err(|err| {
             tracing::error!("Model inference stop due to {}", err);
             #[cfg(not(feature = "disable-mouse"))]
-            keep_running.store(false, Ordering::Relaxed);
+            cancel_token_child.cancel();
             err
         })?;
         Ok::<_, anyhow::Error>(())
     });
 
-    let keep_running = running.clone();
-    thread::spawn(move || {
-        start_event_listener(signal, aim_mode, serving_port_event_listener).map_err(|err| {
-            tracing::error!("Event listener stop due to {}", err);
-            keep_running.store(false, Ordering::Relaxed);
-            err
-        })?;
-        Ok::<_, anyhow::Error>(())
-    });
-
-    let r = running.clone();
-    ctrlc::set_handler(move || {
-        r.store(false, Ordering::SeqCst);
-    })?;
-    while running.load(Ordering::SeqCst) {
-        thread::sleep(Duration::from_millis(1000));
-    }
-    if config.makcu_mouse_lock_while_aim {
-        let mut mouse = MouseVirtual::new(&makcu_port, makcu_baud)?;
-        mouse.batch().unlock_mx().unlock_my().run()?;
-    }
-    tracing::warn!("Server stopped.");
+    start_event_listener(signal, aim_mode, serving_port_event_listener, cancel_token).await?;
     Ok(())
 }

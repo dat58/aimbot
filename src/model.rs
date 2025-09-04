@@ -59,7 +59,7 @@ impl Model {
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_execution_providers(providers)?
-            .with_intra_threads(1)?
+            .with_intra_threads(3)?
             .with_independent_thread_pool()?
             .commit_from_file(config.model_path)?;
         let input_name = session
@@ -95,7 +95,7 @@ impl Model {
 
 impl Model {
     #[inline]
-    pub fn infer(&self, mat: &Mat) -> Result<Bboxes> {
+    pub async fn infer(&self, mat: &Mat) -> Result<Bboxes> {
         // preprocess
         let pre_time = Instant::now();
         let mut inputs =
@@ -129,9 +129,8 @@ impl Model {
 
         // inference
         let infer_time = Instant::now();
-        let outputs = self
-            .session
-            .run(ort::inputs![self.input_name.as_str() => inputs]?)?;
+        let inputs = ort::inputs![self.input_name.clone() => inputs]?;
+        let outputs = self.session.run_async(inputs)?.await?;
         let infer_time = infer_time.elapsed();
 
         // postprocess

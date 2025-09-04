@@ -37,6 +37,7 @@ pub fn handle_capture(
     queue: Arc<ArrayQueue<Mat>>,
     retry_time: usize,
     retry_interval: Duration,
+    sleep_interval: Option<Duration>,
 ) {
     loop {
         let now = Instant::now();
@@ -44,9 +45,12 @@ pub fn handle_capture(
             Ok(mat) => {
                 tracing::debug!("[Stream] captured took: {:?}", now.elapsed());
                 queue.force_push(mat);
+                if let Some(sleep_interval) = sleep_interval {
+                    std::thread::sleep(sleep_interval);
+                }
             }
             Err(e) => {
-                tracing::error!("[Stream] {}, try reconnecting", e);
+                tracing::error!("[Stream] {}, try reconnecting...", e);
                 let mut reconnect_success = false;
                 for _ in 0..retry_time {
                     if cap.reconnect().is_ok() {

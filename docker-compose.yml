@@ -22,6 +22,7 @@ services:
       - REGION_WIDTH=256
       - REGION_HEIGHT=256
       - SCALE_MIN_ZONE=0.85
+      - SLEEP_INTERVAL_CAPTURE=2
       - MODEL_PROVIDER=CPU
       - MODEL_PATH=/app/assets/best.onnx
       - TRT_CACHE_DIR=/app/assets
@@ -36,6 +37,5 @@ services:
       - TRT_BUILDER_OPTIMIZATION_LEVEL=5
       - MAKCU_PORT=/dev/ttyACM0
       - MAKCU_BAUD=4000000
-      - MAKCU_MOUSE_LOCK_WHILE_AIM=false
       - MOUSE_DPI=1000
       - GAME_SENS=1.0

@@ -5,6 +5,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use tokio_util::sync::CancellationToken;
 
 pub enum Event {
     AimOff,
@@ -194,41 +195,42 @@ async fn stream_status(
     Ok(HttpResponse::Ok().body(format!("{signal},{aim_mode}")))
 }
 
-pub fn start_event_listener(
+pub async fn start_event_listener(
     signal: Arc<AtomicBool>,
     aim_mode: AimMode,
     serving_port: u16,
+    cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
-    actix_web::rt::System::new().block_on(async {
-        let signal = web::Data::new(signal);
-        let aim_mode = web::Data::new(aim_mode);
-        HttpServer::new(move || {
-            App::new()
-                .wrap(
-                    Cors::default()
-                        .allow_any_origin()
-                        .allowed_headers(vec![
-                            header::AUTHORIZATION,
-                            header::ACCEPT,
-                            header::CONTENT_TYPE,
-                        ])
-                        .allowed_methods(vec!["GET", "PUT"])
-                        .max_age(3600),
-                )
-                .app_data(signal.clone())
-                .app_data(aim_mode.clone())
-                .app_data(web::PayloadConfig::default().limit(1024 * 1024))
-                .route("/health", web::get().to(HttpResponse::Ok))
-                .service(event)
-                .service(board)
-                .service(stream_status)
-        })
-        .workers(2)
-        .bind(format!("0.0.0.0:{serving_port}"))?
-        .run()
-        .await?;
-        Ok(())
+    let signal = web::Data::new(signal);
+    let aim_mode = web::Data::new(aim_mode);
+    HttpServer::new(move || {
+        App::new()
+            .wrap(
+                Cors::default()
+                    .allow_any_origin()
+                    .allowed_headers(vec![
+                        header::AUTHORIZATION,
+                        header::ACCEPT,
+                        header::CONTENT_TYPE,
+                    ])
+                    .allowed_methods(vec!["GET", "PUT"])
+                    .max_age(3600),
+            )
+            .app_data(signal.clone())
+            .app_data(aim_mode.clone())
+            .app_data(web::PayloadConfig::default().limit(1024 * 1024))
+            .route("/health", web::get().to(HttpResponse::Ok))
+            .service(event)
+            .service(board)
+            .service(stream_status)
     })
+    .workers(2)
+    .bind(format!("0.0.0.0:{serving_port}"))?
+    .shutdown_signal(cancel_token.cancelled_owned())
+    .run()
+    .await?;
+    tracing::warn!("Server stopped.");
+    Ok(())
 }
 
 impl TryFrom<&str> for Event {

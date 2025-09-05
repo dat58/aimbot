@@ -20,45 +20,53 @@ impl MouseVirtual {
         if !ALLOWED_BAUD_RATE.contains(&baud) {
             bail!("Baud rate out of range, allowed: {:?}", ALLOWED_BAUD_RATE);
         }
-        let mut serial = serialport::new(port, DEFAULT_BAUD_RATE)
+        let serial = serialport::new(port, baud)
             .timeout(Duration::from_millis(100))
-            .open()?;
-        if baud != DEFAULT_BAUD_RATE {
-            serial.write_all(&BAUD_CHANGE_COMMAND)?;
-            serial.flush()?;
-            serial.set_baud_rate(baud)?;
-            serial.clear(serialport::ClearBuffer::Input)?;
-            serial.clear(serialport::ClearBuffer::Output)?;
-            sleep(Duration::from_millis(100));
-            serial.write_all(VERIFY_COMMAND)?;
-            let mut verification_response = String::new();
-            let mut buffer = [0; 128];
-            loop {
-                match serial.read(&mut buffer) {
-                    Ok(bytes_read) => {
-                        if bytes_read > 0 {
-                            verification_response
-                                .push_str(&String::from_utf8_lossy(&buffer[..bytes_read]));
-                            if verification_response.contains("km.MAKCU") {
-                                break;
+            .open();
+        let serial = match serial {
+            Ok(serial) => serial,
+            Err(_) => {
+                let mut serial = serialport::new(port, DEFAULT_BAUD_RATE)
+                    .timeout(Duration::from_millis(100))
+                    .open()?;
+                serial.write_all(&BAUD_CHANGE_COMMAND)?;
+                serial.flush()?;
+                serial.set_baud_rate(baud)?;
+                serial.clear(serialport::ClearBuffer::Input)?;
+                serial.clear(serialport::ClearBuffer::Output)?;
+                sleep(Duration::from_millis(100));
+                serial.write_all(VERIFY_COMMAND)?;
+                let mut verification_response = String::new();
+                let mut buffer = [0; 128];
+                loop {
+                    match serial.read(&mut buffer) {
+                        Ok(bytes_read) => {
+                            if bytes_read > 0 {
+                                verification_response
+                                    .push_str(&String::from_utf8_lossy(&buffer[..bytes_read]));
+                                if verification_response.contains("km.MAKCU") {
+                                    break;
+                                }
                             }
                         }
-                    }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                        tracing::error!(
-                            "Verification MAKCU change baud rate timed out. Check the connection."
-                        );
-                        bail!(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "Timeout during verification"
-                        ));
-                    }
-                    Err(e) => {
-                        bail!(e);
+                        Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                            tracing::error!(
+                                "Verification MAKCU change baud rate timed out. Check the connection."
+                            );
+                            bail!(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                "Timeout during verification"
+                            ));
+                        }
+                        Err(e) => {
+                            bail!(e);
+                        }
                     }
                 }
+                serial
             }
-        }
+        };
+        tracing::info!("Mouse connected at baud rate: {:?}", serial.baud_rate());
         Ok(Self {
             serial,
             random: rand::rng(),

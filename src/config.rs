@@ -38,8 +38,10 @@ pub struct Config {
     pub trt_dla_enable: Option<bool>,
     pub trt_dla_core: Option<u32>,
     pub trt_auxiliary_streams: Option<i8>,
-    pub model_cache_dir: String,
+    pub trt_cache_dir: String,
     pub intra_threads: usize,
+
+    pub migraphx_cache_dir: String,
 
     pub makcu_port: String,
     pub makcu_baud: u32,
@@ -137,6 +139,8 @@ impl Config {
             .unwrap_or("3".to_string())
             .parse::<usize>()
             .expect("INTRA_THREADS is not a number");
+        let migraphx_cache_dir =
+            var("MIGRAPHX_CACHE_DIR").expect("No MIGRAPHX_CACHE_DIR specified");
         let makcu_port = var("MAKCU_PORT").expect("No MAKCU_PORT specified");
         let makcu_baud = var("MAKCU_BAUD")
             .unwrap_or("115200".to_string())
@@ -179,8 +183,9 @@ impl Config {
             trt_dla_enable,
             trt_dla_core,
             trt_auxiliary_streams,
-            model_cache_dir: trt_cache_dir,
+            trt_cache_dir,
             intra_threads,
+            migraphx_cache_dir,
             makcu_port,
             makcu_baud,
             mouse_dpi,

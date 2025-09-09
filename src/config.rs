@@ -134,7 +134,7 @@ impl Config {
         let trt_auxiliary_streams = var("TRT_AUXILIARY_STREAMS")
             .ok()
             .and_then(|s| s.parse::<i8>().ok());
-        let trt_cache_dir = var("MODEL_CACHE_DIR").expect("No MODEL_CACHE_DIR specified");
+        let trt_cache_dir = var("TRT_CACHE_DIR").expect("No TRT_CACHE_DIR specified");
         let intra_threads = var("INTRA_THREADS")
             .unwrap_or("3".to_string())
             .parse::<usize>()

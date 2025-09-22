@@ -83,7 +83,7 @@ impl Model {
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_execution_providers(providers)?
-            .with_intra_threads(8)?
+            .with_intra_threads(config.intra_threads)?
             .with_independent_thread_pool()?
             .commit_from_file(config.model_path)?;
         let input_name = session

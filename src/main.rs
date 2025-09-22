@@ -35,6 +35,7 @@ fn main() -> Result<()> {
             EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info"))?,
         ))
         .init();
+    ort::init().commit()?;
     let config = Config::new();
     let crosshair = Point2f::new(
         config.screen_width as f32 / 2.,

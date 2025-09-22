@@ -71,7 +71,8 @@ impl Model {
                 OpenVINOExecutionProvider::default()
                     .with_device_id(config.gpu_id.unwrap_or(0))
                     .with_cache_dir(&config.openvino_cache_dir)
-                    .with_device_type("CPU")
+                    // allowed [CPU, GPU, NPU, GPU.0, GPU.1, ...]
+                    .with_device_type(&config.openvino_device_type)
                     .build()
             ],
             _ => vec![

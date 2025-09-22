@@ -2,8 +2,8 @@ use std::{env::var, path::PathBuf};
 
 pub const SCALE_HEAD_Y: f32 = 0.8 / 6.;
 pub const SCALE_NECK_Y: f32 = 2.5 / 6.;
-pub const SCALE_CHEST_Y: f32 = 3.5 / 6.;
-pub const SCALE_ABDOMEN_Y: f32 = 5.1 / 6.;
+pub const SCALE_CHEST_Y: f32 = 3.0 / 6.;
+pub const SCALE_ABDOMEN_Y: f32 = 5.0 / 6.;
 pub const WIN_DPI_SCALE_FACTOR: f64 = 96.;
 
 #[derive(Debug, Clone)]

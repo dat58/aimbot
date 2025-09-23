@@ -25,6 +25,7 @@ pub struct Model {
     conf: f32,
     iou: f32,
     roi: Rect,
+    crop: bool,
 }
 
 impl Model {
@@ -57,7 +58,7 @@ impl Model {
                 MIGraphXExecutionProvider::default()
                     .with_exhaustive_tune(true)
                     .with_device_id(config.gpu_id.unwrap_or(0))
-                    .build()
+                    .build(),
             ],
             "Rocm" | "rocm" => vec![
                 ROCmExecutionProvider::default()
@@ -65,7 +66,7 @@ impl Model {
                     .with_tuning(true)
                     .with_mem_limit(config.gpu_mem_limit.unwrap_or(1024 * 1024 * 1024))
                     .with_hip_graph(true)
-                    .build()
+                    .build(),
             ],
             "OpenVino" | "openvino" => vec![
                 OpenVINOExecutionProvider::default()
@@ -73,7 +74,7 @@ impl Model {
                     .with_cache_dir(&config.openvino_cache_dir)
                     // allowed [CPU, GPU, NPU, GPU.0, GPU.1, ...]
                     .with_device_type(&config.openvino_device_type)
-                    .build()
+                    .build(),
             ],
             _ => vec![
                 CPUExecutionProvider::default()
@@ -101,6 +102,8 @@ impl Model {
             .collect::<Vec<_>>()
             .pop()
             .unwrap();
+        let crop = config.screen_width != config.region_width
+            || config.screen_height != config.region_height;
         Ok(Self {
             session,
             input_name,
@@ -114,6 +117,7 @@ impl Model {
                 config.region_width as i32,
                 config.region_height as i32,
             ),
+            crop,
         })
     }
 }
@@ -126,13 +130,17 @@ impl Model {
         let mut inputs =
             Array::<f32, _>::from_elem((1, 3, self.input_size, self.input_size), 114. / 255.)
                 .into_dyn();
-        let input = Mat::roi(mat, self.roi)?.clone_pointee();
+        let input = if self.crop {
+            std::borrow::Cow::Owned(Mat::roi(mat, self.roi)?.clone_pointee())
+        } else {
+            std::borrow::Cow::Borrowed(mat)
+        };
         let (w0, h0) = (input.cols() as f32, input.rows() as f32);
         let (ratio, w_new, h_new) = self.scale_wh(w0, h0);
         let (w_new, h_new) = (w_new as i32, h_new as i32);
         let mut img = Mat::default();
         let _ = resize(
-            &input,
+            input.as_ref(),
             &mut img,
             Size::new(w_new, h_new),
             0f64,

@@ -4,7 +4,7 @@ use opencv::{
     core::Mat,
     videoio::{
         CAP_PROP_FPS, CAP_PROP_FRAME_HEIGHT, CAP_PROP_FRAME_WIDTH, VideoCapture, VideoCaptureTrait,
-        VideoCaptureTraitConst,
+        VideoCaptureTraitConst, CAP_FFMPEG,
     },
 };
 
@@ -15,7 +15,7 @@ pub struct UDP {
 
 impl UDP {
     pub fn new(url: &str) -> Result<Self> {
-        let cap = VideoCapture::from_file_def(url)?;
+        let cap = VideoCapture::from_file(url, CAP_FFMPEG)?;
         if !cap.is_opened()? {
             bail!("[Stream] unable to open capture stream at: {}", url);
         } else {
@@ -52,7 +52,8 @@ impl StreamCapture for UDP {
     }
 
     fn reconnect(&mut self) -> Result<()> {
-        let cap = VideoCapture::from_file_def(&self.url)?;
+        let _ = self.cap.release();
+        let cap = VideoCapture::from_file(&self.url, CAP_FFMPEG)?;
         if !cap.is_opened()? {
             let error = "[Stream] unable to reconnect to the stream.";
             tracing::error!("{}", error);

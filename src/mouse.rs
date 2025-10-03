@@ -16,7 +16,7 @@ pub struct MouseVirtual {
 
 impl MouseVirtual {
     pub fn new(port: &str, baud: u32) -> Result<Self> {
-        tracing::info!("All available serial port: {:?}", available_ports());
+        tracing::debug!("All available serial port: {:?}", available_ports());
         if !ALLOWED_BAUD_RATE.contains(&baud) {
             bail!("Baud rate out of range, allowed: {:?}", ALLOWED_BAUD_RATE);
         }

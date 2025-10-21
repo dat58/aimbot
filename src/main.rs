@@ -35,6 +35,7 @@ fn main() -> Result<()> {
             EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info"))?,
         ))
         .init();
+    ort::init().commit()?;
     let config = Config::new();
     let crosshair = Point2f::new(
         config.screen_width as f32 / 2.,
@@ -69,7 +70,7 @@ fn main() -> Result<()> {
     let capture_queue = frame_queue.clone();
     let keep_running = running.clone();
     thread::spawn(move || {
-        handle_capture(source_stream, capture_queue, 12, Duration::from_secs(5));
+        handle_capture(source_stream, capture_queue, 1000, Duration::from_millis(10));
         tracing::error!("Capture stream stopped");
         keep_running.store(false, Ordering::Relaxed);
     });

@@ -1,9 +1,9 @@
 use std::{env::var, path::PathBuf};
 
-pub const SCALE_HEAD_Y: f32 = 2. / 6.;
+pub const SCALE_HEAD_Y: f32 = 0.8 / 6.;
 pub const SCALE_NECK_Y: f32 = 2.5 / 6.;
-pub const SCALE_CHEST_Y: f32 = 3.5 / 6.;
-pub const SCALE_ABDOMEN_Y: f32 = 5.1 / 6.;
+pub const SCALE_CHEST_Y: f32 = 3.0 / 6.;
+pub const SCALE_ABDOMEN_Y: f32 = 5.0 / 6.;
 pub const WIN_DPI_SCALE_FACTOR: f64 = 96.;
 
 #[derive(Debug, Clone)]
@@ -38,6 +38,10 @@ pub struct Config {
     pub trt_dla_core: Option<u32>,
     pub trt_auxiliary_streams: Option<i8>,
     pub trt_cache_dir: String,
+
+    pub openvino_cache_dir: String,
+    pub openvino_device_type: String,
+    pub intra_threads: usize,
 
     pub makcu_port: String,
     pub makcu_baud: u32,
@@ -127,6 +131,13 @@ impl Config {
             .ok()
             .and_then(|s| s.parse::<i8>().ok());
         let trt_cache_dir = var("TRT_CACHE_DIR").expect("No TRT_CACHE_DIR specified");
+        let openvino_cache_dir =
+            var("OPENVINO_CACHE_DIR").expect("No OPENVINO_CACHE_DIR specified");
+        let openvino_device_type = var("OPENVINO_DEVICE_TYPE").unwrap_or("CPU".to_string());
+        let intra_threads = var("INTRA_THREADS")
+            .unwrap_or("1".to_string())
+            .parse::<usize>()
+            .expect("INTRA_THREADS must be a number");
         let makcu_port = var("MAKCU_PORT").expect("No MAKCU_PORT specified");
         let makcu_baud = var("MAKCU_BAUD")
             .unwrap_or("115200".to_string())
@@ -173,6 +184,9 @@ impl Config {
             trt_dla_core,
             trt_auxiliary_streams,
             trt_cache_dir,
+            openvino_cache_dir,
+            openvino_device_type,
+            intra_threads,
             makcu_port,
             makcu_baud,
             makcu_mouse_lock_while_aim,

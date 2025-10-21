@@ -30,38 +30,40 @@ async fn event(
         Ok(event) => {
             match event {
                 Event::AimOff => {
-                    use_auto_aim.store(false, Ordering::SeqCst);
-                    tracing::info!("[Event] turn off aim bot.")
+                    if !use_trigger.load(Ordering::SeqCst) {
+                        use_auto_aim.store(false, Ordering::SeqCst);
+                        tracing::info!("[Event] turn off aim bot.");
+                    }
                 }
                 Event::AimOn => {
                     use_auto_aim.store(true, Ordering::SeqCst);
-                    tracing::info!("[Event] turn on aim bot.")
+                    tracing::info!("[Event] turn on aim bot.");
                 }
                 Event::AimModeHead => {
                     aim_mode.set_mode(Mode::Head);
-                    tracing::info!("[Event] change to aim mode Head.")
+                    tracing::info!("[Event] change to aim mode Head.");
                 }
                 Event::AimModeNeck => {
                     aim_mode.set_mode(Mode::Neck);
-                    tracing::info!("[Event] change to aim mode Neck.")
+                    tracing::info!("[Event] change to aim mode Neck.");
                 }
                 Event::AimModeChest => {
                     aim_mode.set_mode(Mode::Chest);
-                    tracing::info!("[Event] change to aim mode Chest.")
+                    tracing::info!("[Event] change to aim mode Chest.");
                 }
                 Event::AimModeAbdomen => {
                     aim_mode.set_mode(Mode::Abdomen);
-                    tracing::info!("[Event] change to aim mode Abdomen.")
+                    tracing::info!("[Event] change to aim mode Abdomen.");
                 }
                 Event::UseTrigger => {
                     use_trigger.store(true, Ordering::SeqCst);
                     use_auto_aim.store(true, Ordering::SeqCst);
-                    tracing::info!("[Event] change to Trigger.")
+                    tracing::info!("[Event] change to Trigger.");
                 }
                 Event::UseAutoAim => {
                     use_trigger.store(false, Ordering::SeqCst);
                     use_auto_aim.store(true, Ordering::SeqCst);
-                    tracing::info!("[Event] change to Auto Aim.")
+                    tracing::info!("[Event] change to Auto Aim.");
                 }
             }
             Ok(HttpResponse::Ok().finish())

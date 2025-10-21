@@ -64,7 +64,8 @@ fn main() -> Result<()> {
     };
     let model = Model::new(config.clone())?;
     let frame_queue = Arc::new(ArrayQueue::<Mat>::new(1));
-    let signal = Arc::new(AtomicBool::new(true));
+    let use_trigger = Arc::new(AtomicBool::new(true));
+    let use_auto_aim = Arc::new(AtomicBool::new(true));
     let aim_mode = AimMode::default();
     let running = Arc::new(AtomicBool::new(true));
 
@@ -81,10 +82,13 @@ fn main() -> Result<()> {
         keep_running.store(false, Ordering::Relaxed);
     });
 
-    let turn_on = signal.clone();
+    let trigger = use_trigger.clone();
+    let auto_aim = use_auto_aim.clone();
     let aim = aim_mode.clone();
     #[cfg(not(feature = "disable-mouse"))]
     let keep_running = running.clone();
+    #[cfg(not(feature = "disable-mouse"))]
+    let keep_running_clone = keep_running.clone();
     thread::spawn(move || {
         let f = move || -> Result<(), anyhow::Error> {
             #[cfg(feature = "debug")]
@@ -99,17 +103,91 @@ fn main() -> Result<()> {
             }
 
             #[cfg(not(feature = "disable-mouse"))]
-            let (mut mouse, mut random) = {
+            let (mouse, mut random) = {
                 let mouse =
                     MouseVirtual::new(&config.makcu_port, config.makcu_baud).map_err(|err| {
                         anyhow!(format!("Mouse cannot not initialized due to {}", err))
                     })?;
                 tracing::info!("Mouse initialized");
+
+                let mouse = Arc::new(mouse);
+                let m = mouse.clone();
+                let running = keep_running_clone.clone();
+                thread::spawn(move || {
+                    tracing::info!("Start listening mouse button");
+                    m.listen_button_presses();
+                    running.store(false, Ordering::Relaxed);
+                });
+
+                let m = mouse.clone();
+                let trigger_clone = trigger.clone();
+                let auto_aim_clone = auto_aim.clone();
+                let running = keep_running_clone.clone();
+                thread::spawn(move || {
+                    tracing::info!("Start handling the switch trigger/auto_aim button");
+                    let f = Box::new(move || {
+                        let mut last_value = trigger_clone.load(Ordering::Acquire);
+                        last_value = !last_value;
+                        trigger_clone.store(last_value, Ordering::Release);
+                        // auto_aim always set to `true` every time trigger changed
+                        auto_aim_clone.store(true, Ordering::Release);
+                        tracing::info!("trigger modified to {}", last_value);
+                    });
+                    m.handle_right_holding(
+                        // hold right mouse button ~2 seconds to switch
+                        // between trigger & auto aim bot
+                        Duration::from_millis(1500),
+                        Duration::from_millis(100),
+                        f,
+                    );
+                    running.store(false, Ordering::Relaxed);
+                });
+
+                let m = mouse.clone();
+                let trigger_clone = trigger.clone();
+                let auto_aim_clone = auto_aim.clone();
+                let running = keep_running_clone.clone();
+                thread::spawn(move || {
+                    tracing::info!("Start handling the switch auto aim button side4");
+                    let f = Box::new(move || {
+                        if !trigger_clone.load(Ordering::Acquire) {
+                            auto_aim_clone.store(true, Ordering::Release);
+                        }
+                    });
+                    m.handle_side4_holding(
+                        // hold side4 mouse button ~20 millis second `turn on` auto aim
+                        Duration::from_millis(0),
+                        Duration::from_millis(20),
+                        f,
+                    );
+                    running.store(false, Ordering::Relaxed);
+                });
+
+                let m = mouse.clone();
+                let trigger_clone = trigger.clone();
+                let auto_aim_clone = auto_aim.clone();
+                let running = keep_running_clone.clone();
+                thread::spawn(move || {
+                    tracing::info!("Start handling the switch auto aim button side5");
+                    let f = Box::new(move || {
+                        if !trigger_clone.load(Ordering::Acquire) {
+                            auto_aim_clone.store(false, Ordering::Release);
+                        }
+                    });
+                    m.handle_side5_holding(
+                        // hold side5 mouse button ~20 millis second `turn off` auto aim
+                        Duration::from_millis(0),
+                        Duration::from_millis(20),
+                        f,
+                    );
+                    running.store(false, Ordering::Relaxed);
+                });
+
                 (mouse, rand::rng())
             };
 
             loop {
-                if turn_on.load(Ordering::Relaxed) {
+                if auto_aim.load(Ordering::Relaxed) {
                     if let Some(image) = frame_queue.pop() {
                         let mut bboxes = model.infer(&image)?;
                         bboxes.sort_by(|a, b| {
@@ -133,18 +211,21 @@ fn main() -> Result<()> {
                                     * WIN_DPI_SCALE_FACTOR
                                     / config.game_sens
                                     / config.mouse_dpi;
-                                if config.makcu_mouse_lock_while_aim {
-                                    mouse
-                                        .batch()
-                                        .lock_mx()
-                                        .lock_my()
-                                        .move_bezier(dx, dy, &mut random)
-                                        .unlock_mx()
-                                        .unlock_my()
-                                        .run()?;
-                                } else {
-                                    mouse.move_bezier(dx, dy, &mut random)?;
-                                };
+                                let use_trigger = trigger.load(Ordering::Acquire);
+                                if (use_trigger && mouse.is_side4_pressing()) || (!use_trigger) {
+                                    if config.makcu_mouse_lock_while_aim {
+                                        mouse
+                                            .batch()
+                                            .lock_mx()
+                                            .lock_my()
+                                            .move_bezier(dx, dy, &mut random)
+                                            .unlock_mx()
+                                            .unlock_my()
+                                            .run()?;
+                                    } else {
+                                        mouse.move_bezier(dx, dy, &mut random)?;
+                                    };
+                                }
                             }
 
                             #[cfg(feature = "debug")]
@@ -251,7 +332,13 @@ fn main() -> Result<()> {
 
     let keep_running = running.clone();
     thread::spawn(move || {
-        start_event_listener(signal, aim_mode, serving_port_event_listener).map_err(|err| {
+        start_event_listener(
+            use_trigger,
+            use_auto_aim,
+            aim_mode,
+            serving_port_event_listener,
+        )
+        .map_err(|err| {
             tracing::error!("Event listener stop due to {}", err);
             keep_running.store(false, Ordering::Relaxed);
             err
@@ -267,7 +354,7 @@ fn main() -> Result<()> {
         thread::sleep(Duration::from_millis(1000));
     }
     if config.makcu_mouse_lock_while_aim {
-        let mut mouse = MouseVirtual::new(&makcu_port, makcu_baud)?;
+        let mouse = MouseVirtual::new(&makcu_port, makcu_baud)?;
         mouse.batch().unlock_mx().unlock_my().run()?;
     }
     tracing::warn!("Server stopped.");

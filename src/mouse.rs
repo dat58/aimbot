@@ -122,38 +122,36 @@ impl MouseVirtual {
     }
 
     pub fn listen_button_presses(self: Arc<Self>) {
-        std::thread::spawn(move || {
-            let mut last_value = 0;
-            let mut buf = [0; 8];
-            loop {
-                let bytes_read = {
-                    let mut serial = self.serial.lock().expect("Could not acquire serial lock");
-                    serial.read(&mut buf)
-                };
-                match bytes_read {
-                    Ok(bytes_read) => {
-                        if bytes_read > 0 {
-                            buf.into_iter().for_each(|v| {
-                                if v != 0x0A && v != 0x0D && v < 32 {
-                                    let changed = last_value ^ v;
-                                    if changed > 0 {
-                                        for i in 0..self.pressed.len() {
-                                            let m = 1 << i;
-                                            if changed & m > 0 {
-                                                self.pressed[i].store(v & m > 0, Ordering::Release);
-                                            }
+        let mut last_value = 0;
+        let mut buf = [0; 8];
+        loop {
+            let bytes_read = {
+                let mut serial = self.serial.lock().expect("Could not acquire serial lock");
+                serial.read(&mut buf)
+            };
+            match bytes_read {
+                Ok(bytes_read) => {
+                    if bytes_read > 0 {
+                        buf.into_iter().for_each(|v| {
+                            if v != 0x0A && v != 0x0D && v < 32 {
+                                let changed = last_value ^ v;
+                                if changed > 0 {
+                                    for i in 0..self.pressed.len() {
+                                        let m = 1 << i;
+                                        if changed & m > 0 {
+                                            self.pressed[i].store(v & m > 0, Ordering::Release);
                                         }
-                                        last_value = v;
                                     }
+                                    last_value = v;
                                 }
-                            });
-                        }
+                            }
+                        });
                     }
-                    _ => {}
                 }
-                sleep(Duration::from_millis(5));
+                _ => {}
             }
-        });
+            sleep(Duration::from_millis(5));
+        }
     }
 
     fn is_button_pressing(&self, button: usize) -> bool {
@@ -165,29 +163,25 @@ impl MouseVirtual {
         button: usize,
         hold_duration: Duration,
         interval: Duration,
-        value: Arc<AtomicBool>,
+        f: Box<dyn Fn() -> ()>,
     ) {
-        std::thread::spawn(move || {
-            let mut last_value = value.load(Ordering::Acquire);
-            loop {
-                if self.pressed[button].load(Ordering::Acquire) {
-                    let time = Instant::now();
-                    loop {
-                        sleep(interval);
-                        if self.pressed[button].load(Ordering::Acquire) {
-                            if time.elapsed() >= hold_duration {
-                                last_value = !last_value;
-                                value.store(last_value, Ordering::Release);
-                                break;
-                            }
-                        } else {
+        loop {
+            if self.pressed[button].load(Ordering::Acquire) {
+                let time = Instant::now();
+                loop {
+                    sleep(interval);
+                    if self.pressed[button].load(Ordering::Acquire) {
+                        if time.elapsed() >= hold_duration {
+                            f();
                             break;
                         }
+                    } else {
+                        break;
                     }
                 }
-                sleep(interval);
             }
-        });
+            sleep(interval);
+        }
     }
 
     pub fn is_left_pressing(&self) -> bool {
@@ -214,87 +208,87 @@ impl MouseVirtual {
         self: Arc<Self>,
         hold_duration: Duration,
         interval: Duration,
-        value: Arc<AtomicBool>,
+        f: Box<dyn Fn() -> ()>,
     ) {
-        self.handle_button_holding(0, hold_duration, interval, value);
+        self.handle_button_holding(0, hold_duration, interval, f);
     }
 
     pub fn handle_right_holding(
         self: Arc<Self>,
         hold_duration: Duration,
         interval: Duration,
-        value: Arc<AtomicBool>,
+        f: Box<dyn Fn() -> ()>,
     ) {
-        self.handle_button_holding(1, hold_duration, interval, value);
+        self.handle_button_holding(1, hold_duration, interval, f);
     }
 
     pub fn handle_middle_holding(
         self: Arc<Self>,
         hold_duration: Duration,
         interval: Duration,
-        value: Arc<AtomicBool>,
+        f: Box<dyn Fn() -> ()>,
     ) {
-        self.handle_button_holding(2, hold_duration, interval, value);
+        self.handle_button_holding(2, hold_duration, interval, f);
     }
 
     pub fn handle_side4_holding(
         self: Arc<Self>,
         hold_duration: Duration,
         interval: Duration,
-        value: Arc<AtomicBool>,
+        f: Box<dyn Fn() -> ()>,
     ) {
-        self.handle_button_holding(3, hold_duration, interval, value);
+        self.handle_button_holding(3, hold_duration, interval, f);
     }
 
     pub fn handle_side5_holding(
         self: Arc<Self>,
         hold_duration: Duration,
         interval: Duration,
-        value: Arc<AtomicBool>,
+        f: Box<dyn Fn() -> ()>,
     ) {
-        self.handle_button_holding(4, hold_duration, interval, value);
+        self.handle_button_holding(4, hold_duration, interval, f);
     }
 
     /// Lock physical mouse on X-axis direction
-    pub fn lock_mx(&mut self) -> Result<()> {
+    pub fn lock_mx(&self) -> Result<()> {
         self.cmd("km.lock_mx(1)")
     }
 
     /// Unlock physical mouse on X-axis direction
-    pub fn unlock_mx(&mut self) -> Result<()> {
+    pub fn unlock_mx(&self) -> Result<()> {
         self.cmd("km.lock_mx(0)")
     }
 
     /// Lock physical mouse on Y-axis direction
-    pub fn lock_my(&mut self) -> Result<()> {
+    pub fn lock_my(&self) -> Result<()> {
         self.cmd("km.lock_my(1)")
     }
 
     /// Unlock physical mouse on Y-axis direction
-    pub fn unlock_my(&mut self) -> Result<()> {
+    pub fn unlock_my(&self) -> Result<()> {
         self.cmd("km.lock_my(0)")
     }
 
-    pub fn click_left(&mut self) -> Result<()> {
+    pub fn click_left(&self) -> Result<()> {
         self.cmd(format!("km.left(1){CRLF}km.left(0)").as_str())
     }
 
-    pub fn click_right(&mut self) -> Result<()> {
+    pub fn click_right(&self) -> Result<()> {
         self.cmd(format!("km.right(1){CRLF}km.right(0)").as_str())
     }
 
-    pub fn batch(&mut self) -> BatchCommands {
+    pub fn batch(&self) -> BatchCommands {
         BatchCommands::new(self)
     }
 }
 
 pub struct BatchCommands<'a> {
-    mouse: &'a mut MouseVirtual,
+    mouse: &'a MouseVirtual,
     buf: String,
 }
 
 impl<'a> BatchCommands<'a> {
-    pub fn new(mouse: &'a mut MouseVirtual) -> Self {
+    pub fn new(mouse: &'a MouseVirtual) -> Self {
         Self {
             mouse,
             buf: String::new(),
@@ -348,7 +342,7 @@ impl<'a> BatchCommands<'a> {
         self
     }
 
-    pub fn run(&mut self) -> Result<()> {
+    pub fn run(&self) -> Result<()> {
         self.mouse.cmd(self.buf.as_str())
     }
 }

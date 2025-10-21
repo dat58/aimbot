@@ -134,10 +134,10 @@ fn main() -> Result<()> {
                         tracing::info!("trigger modified to {}", last_value);
                     });
                     m.handle_right_holding(
-                        // hold right mouse button ~2 seconds to switch
+                        // hold right mouse to switch
                         // between trigger & auto aim bot
-                        Duration::from_millis(1500),
-                        Duration::from_millis(100),
+                        Duration::from_millis(500),
+                        Duration::from_millis(50),
                         f,
                     );
                     running.store(false, Ordering::Relaxed);
@@ -152,12 +152,13 @@ fn main() -> Result<()> {
                     let f = Box::new(move || {
                         if !trigger_clone.load(Ordering::Acquire) {
                             auto_aim_clone.store(true, Ordering::Release);
+                            tracing::info!("Auto aim modified to true");
                         }
                     });
                     m.handle_side4_holding(
                         // hold side4 mouse button ~20 millis second `turn on` auto aim
                         Duration::from_millis(0),
-                        Duration::from_millis(20),
+                        Duration::from_millis(50),
                         f,
                     );
                     running.store(false, Ordering::Relaxed);
@@ -172,12 +173,13 @@ fn main() -> Result<()> {
                     let f = Box::new(move || {
                         if !trigger_clone.load(Ordering::Acquire) {
                             auto_aim_clone.store(false, Ordering::Release);
+                            tracing::info!("Auto aim modified to false");
                         }
                     });
                     m.handle_side5_holding(
                         // hold side5 mouse button ~20 millis second `turn off` auto aim
                         Duration::from_millis(0),
-                        Duration::from_millis(20),
+                        Duration::from_millis(50),
                         f,
                     );
                     running.store(false, Ordering::Relaxed);

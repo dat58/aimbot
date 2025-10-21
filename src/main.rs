@@ -11,6 +11,7 @@ use aimbot::{
 use anyhow::{Result, anyhow};
 use crossbeam::queue::ArrayQueue;
 use opencv::core::{Mat, MatTraitConst};
+use rand::prelude::*;
 use std::{
     io::Write,
     sync::{
@@ -70,7 +71,12 @@ fn main() -> Result<()> {
     let capture_queue = frame_queue.clone();
     let keep_running = running.clone();
     thread::spawn(move || {
-        handle_capture(source_stream, capture_queue, 1000, Duration::from_millis(10));
+        handle_capture(
+            source_stream,
+            capture_queue,
+            1000,
+            Duration::from_millis(10),
+        );
         tracing::error!("Capture stream stopped");
         keep_running.store(false, Ordering::Relaxed);
     });
@@ -93,13 +99,13 @@ fn main() -> Result<()> {
             }
 
             #[cfg(not(feature = "disable-mouse"))]
-            let mut mouse = {
+            let (mut mouse, mut random) = {
                 let mouse =
                     MouseVirtual::new(&config.makcu_port, config.makcu_baud).map_err(|err| {
                         anyhow!(format!("Mouse cannot not initialized due to {}", err))
                     })?;
                 tracing::info!("Mouse initialized");
-                mouse
+                (mouse, rand::rng())
             };
 
             loop {
@@ -132,12 +138,12 @@ fn main() -> Result<()> {
                                         .batch()
                                         .lock_mx()
                                         .lock_my()
-                                        .move_bezier(dx, dy)
+                                        .move_bezier(dx, dy, &mut random)
                                         .unlock_mx()
                                         .unlock_my()
                                         .run()?;
                                 } else {
-                                    mouse.move_bezier(dx, dy)?;
+                                    mouse.move_bezier(dx, dy, &mut random)?;
                                 };
                             }
 

@@ -1,7 +1,14 @@
 use anyhow::{Result, bail};
 use rand::prelude::*;
 use serialport::{self, SerialPort, available_ports};
-use std::{thread::sleep, time::Duration};
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::sleep,
+    time::{Duration, Instant},
+};
 
 const BAUD_CHANGE_COMMAND: [u8; 9] = [0xDE, 0xAD, 0x05, 0x00, 0xA5, 0x00, 0x09, 0x3D, 0x00];
 const VERIFY_COMMAND: &[u8] = b"km.version()\r\n";
@@ -10,8 +17,8 @@ const ALLOWED_BAUD_RATE: [u32; 3] = [115_200, 2_000_000, 4_000_000];
 const CRLF: &str = "\r\n";
 
 pub struct MouseVirtual {
-    serial: Box<dyn SerialPort>,
-    pub random: ThreadRng,
+    serial: Mutex<Box<dyn SerialPort>>,
+    pressed: [AtomicBool; 5],
 }
 
 impl MouseVirtual {
@@ -26,15 +33,18 @@ impl MouseVirtual {
         let serial = match serial {
             Ok(serial) => serial,
             Err(_) => {
-                let mut serial = serialport::new(port, DEFAULT_BAUD_RATE)
+                {
+                    let mut serial = serialport::new(port, DEFAULT_BAUD_RATE)
+                        .timeout(Duration::from_millis(100))
+                        .open()?;
+                    serial.write_all(&BAUD_CHANGE_COMMAND)?;
+                    serial.clear(serialport::ClearBuffer::Input)?;
+                    serial.clear(serialport::ClearBuffer::Output)?;
+                    sleep(Duration::from_millis(500));
+                }
+                let mut serial = serialport::new(port, baud)
                     .timeout(Duration::from_millis(100))
                     .open()?;
-                serial.write_all(&BAUD_CHANGE_COMMAND)?;
-                serial.flush()?;
-                serial.set_baud_rate(baud)?;
-                serial.clear(serialport::ClearBuffer::Input)?;
-                serial.clear(serialport::ClearBuffer::Output)?;
-                sleep(Duration::from_millis(100));
                 serial.write_all(VERIFY_COMMAND)?;
                 let mut verification_response = String::new();
                 let mut buffer = [0; 128];
@@ -68,48 +78,181 @@ impl MouseVirtual {
         };
         tracing::info!("Mouse connected at baud rate: {:?}", serial.baud_rate());
         Ok(Self {
-            serial,
-            random: rand::rng(),
+            serial: Mutex::new(serial),
+            pressed: Default::default(),
         })
     }
 
     #[inline(always)]
-    fn cmd(&mut self, command: &str) -> Result<()> {
-        Ok(self
-            .serial
-            .write_all(format!("{command}{CRLF}").as_bytes())?)
+    fn cmd(&self, command: &str) -> Result<()> {
+        let mut serial = self.serial.lock().expect("Failed to lock serial port");
+        Ok(serial.write_all(format!("{command}{CRLF}").as_bytes())?)
     }
 
-    pub fn move_shift(&mut self, dx: f64, dy: f64) -> Result<()> {
+    pub fn move_shift(&self, dx: f64, dy: f64) -> Result<()> {
         let dx = dx as i32;
         let dy = dy as i32;
         self.cmd(format!("km.move({dx},{dy})").as_str())
     }
 
-    pub fn move_bezier(&mut self, dx: f64, dy: f64) -> Result<()> {
-        let (steps, ref_x, ref_y) = self.find_bezier(dx, dy);
+    pub fn move_bezier(&self, dx: f64, dy: f64, random: &mut ThreadRng) -> Result<()> {
+        let (steps, ref_x, ref_y) = self.find_bezier(dx, dy, random);
         self.cmd(format!("km.move({dx},{dy},{steps},{ref_x},{ref_y})").as_str())
     }
 
     #[inline(always)]
-    pub(crate) fn find_bezier(&mut self, dx: f64, dy: f64) -> (i32, i32, i32) {
+    pub(crate) fn find_bezier(&self, dx: f64, dy: f64, random: &mut ThreadRng) -> (i32, i32, i32) {
         let pixel = (dx * dx + dy * dy).sqrt();
         let steps = if pixel < 20. {
-            self.random.random_range(0..=5)
+            random.random_range(4..=15)
         } else if pixel < 50. {
-            self.random.random_range(1..=10)
+            random.random_range(15..=35)
         } else if pixel < 200. {
-            self.random.random_range(5..=15)
+            random.random_range(35..=100)
         } else if pixel < 500. {
-            self.random.random_range(10..=20)
+            random.random_range(100..=250)
         } else if pixel < 1200. {
-            self.random.random_range(16..=28)
+            random.random_range(250..=600)
         } else {
-            self.random.random_range(26..=40)
+            random.random_range(600..=1200)
         };
-        let ref_x = self.random.random_range(1..9);
-        let ref_y = self.random.random_range(1..9);
+        let ref_x = random.random_range(4..24);
+        let ref_y = random.random_range(4..24);
         (steps, ref_x, ref_y)
+    }
+
+    pub fn listen_button_presses(self: Arc<Self>) {
+        std::thread::spawn(move || {
+            let mut last_value = 0;
+            let mut buf = [0; 8];
+            loop {
+                let bytes_read = {
+                    let mut serial = self.serial.lock().expect("Could not acquire serial lock");
+                    serial.read(&mut buf)
+                };
+                match bytes_read {
+                    Ok(bytes_read) => {
+                        if bytes_read > 0 {
+                            buf.into_iter().for_each(|v| {
+                                if v != 0x0A && v != 0x0D && v < 32 {
+                                    let changed = last_value ^ v;
+                                    if changed > 0 {
+                                        for i in 0..self.pressed.len() {
+                                            let m = 1 << i;
+                                            if changed & m > 0 {
+                                                self.pressed[i].store(v & m > 0, Ordering::Release);
+                                            }
+                                        }
+                                        last_value = v;
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+                sleep(Duration::from_millis(5));
+            }
+        });
+    }
+
+    fn is_button_pressing(&self, button: usize) -> bool {
+        self.pressed[button].load(Ordering::Acquire)
+    }
+
+    fn handle_button_holding(
+        self: Arc<Self>,
+        button: usize,
+        hold_duration: Duration,
+        interval: Duration,
+        value: Arc<AtomicBool>,
+    ) {
+        std::thread::spawn(move || {
+            let mut last_value = value.load(Ordering::Acquire);
+            loop {
+                if self.pressed[button].load(Ordering::Acquire) {
+                    let time = Instant::now();
+                    loop {
+                        sleep(interval);
+                        if self.pressed[button].load(Ordering::Acquire) {
+                            if time.elapsed() >= hold_duration {
+                                last_value = !last_value;
+                                value.store(last_value, Ordering::Release);
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                sleep(interval);
+            }
+        });
+    }
+
+    pub fn is_left_pressing(&self) -> bool {
+        self.is_button_pressing(0)
+    }
+
+    pub fn is_right_pressing(&self) -> bool {
+        self.is_button_pressing(1)
+    }
+
+    pub fn is_middle_pressing(&self) -> bool {
+        self.is_button_pressing(2)
+    }
+
+    pub fn is_side4_pressing(&self) -> bool {
+        self.is_button_pressing(3)
+    }
+
+    pub fn is_side5_pressing(&self) -> bool {
+        self.is_button_pressing(4)
+    }
+
+    pub fn handle_left_holding(
+        self: Arc<Self>,
+        hold_duration: Duration,
+        interval: Duration,
+        value: Arc<AtomicBool>,
+    ) {
+        self.handle_button_holding(0, hold_duration, interval, value);
+    }
+
+    pub fn handle_right_holding(
+        self: Arc<Self>,
+        hold_duration: Duration,
+        interval: Duration,
+        value: Arc<AtomicBool>,
+    ) {
+        self.handle_button_holding(1, hold_duration, interval, value);
+    }
+
+    pub fn handle_middle_holding(
+        self: Arc<Self>,
+        hold_duration: Duration,
+        interval: Duration,
+        value: Arc<AtomicBool>,
+    ) {
+        self.handle_button_holding(2, hold_duration, interval, value);
+    }
+
+    pub fn handle_side4_holding(
+        self: Arc<Self>,
+        hold_duration: Duration,
+        interval: Duration,
+        value: Arc<AtomicBool>,
+    ) {
+        self.handle_button_holding(3, hold_duration, interval, value);
+    }
+
+    pub fn handle_side5_holding(
+        self: Arc<Self>,
+        hold_duration: Duration,
+        interval: Duration,
+        value: Arc<AtomicBool>,
+    ) {
+        self.handle_button_holding(4, hold_duration, interval, value);
     }
 
     /// Lock physical mouse on X-axis direction
@@ -166,8 +309,8 @@ impl<'a> BatchCommands<'a> {
         self
     }
 
-    pub fn move_bezier(mut self, dx: f64, dy: f64) -> Self {
-        let (steps, ref_x, ref_y) = self.mouse.find_bezier(dx, dy);
+    pub fn move_bezier(mut self, dx: f64, dy: f64, random: &mut ThreadRng) -> Self {
+        let (steps, ref_x, ref_y) = self.mouse.find_bezier(dx, dy, random);
         self.buf
             .push_str(format!("km.move({dx},{dy},{steps},{ref_x},{ref_y}){CRLF}").as_str());
         self

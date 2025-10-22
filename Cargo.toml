@@ -39,3 +39,7 @@ save-bbox = ["debug"]
 ndi4 = ["dep:ndi"]
 ndi6 = ["dep:grafton-ndi", "dep:lazy_static"]
 default = ["ndi4"]
+
+[[bin]]
+path = "src/bin/mouse_test.rs"
+name = "mouse_test"

@@ -43,3 +43,7 @@ default = ["ndi4"]
 [[bin]]
 path = "src/bin/mouse_test.rs"
 name = "mouse_test"
+
+[[bin]]
+path = "src/bin/button_test.rs"
+name = "button_test"

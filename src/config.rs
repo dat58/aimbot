@@ -48,6 +48,8 @@ pub struct Config {
     pub makcu_mouse_lock_while_aim: bool,
     pub mouse_dpi: f64,
     pub game_sens: f64,
+
+    pub esp_port: Option<String>,
 }
 
 impl Config {
@@ -155,6 +157,7 @@ impl Config {
             .unwrap_or("1.".to_string())
             .parse::<f64>()
             .expect("GAME_SENS is not a number");
+        let esp_port = var("ESP_PORT").ok();
         Self {
             event_listener_port,
             source_stream,
@@ -192,6 +195,7 @@ impl Config {
             makcu_mouse_lock_while_aim,
             mouse_dpi,
             game_sens,
+            esp_port,
         }
     }
 }

@@ -3,6 +3,7 @@
 use aimbot::{
     aim::AimMode,
     config::{Config, WIN_DPI_SCALE_FACTOR},
+    esp_button::EspButton,
     event::start_event_listener,
     model::{Bbox, Model, Point2f},
     mouse::MouseVirtual,
@@ -45,6 +46,7 @@ fn main() -> Result<()> {
     let serving_port_event_listener = config.event_listener_port;
     let makcu_port = config.makcu_port.clone();
     let makcu_baud = config.makcu_baud;
+    let esp_port = config.esp_port.clone();
     let source_stream: Box<dyn StreamCapture> = if config.source_stream.starts_with("ndi://") {
         let source_stream = config
             .source_stream
@@ -67,6 +69,7 @@ fn main() -> Result<()> {
     let use_trigger = Arc::new(AtomicBool::new(true));
     let use_auto_aim = Arc::new(AtomicBool::new(true));
     let aim_mode = AimMode::default();
+    let esp_button = Arc::new(AtomicBool::new(false));
     let running = Arc::new(AtomicBool::new(true));
 
     let capture_queue = frame_queue.clone();
@@ -76,11 +79,21 @@ fn main() -> Result<()> {
             source_stream,
             capture_queue,
             1000,
-            Duration::from_millis(10),
+            Duration::from_millis(5),
         );
         tracing::error!("Capture stream stopped");
         keep_running.store(false, Ordering::Relaxed);
     });
+
+    if let Some(esp_port) = esp_port {
+        let mut button = EspButton::new(&esp_port, esp_button.clone())?;
+        let keep_running = running.clone();
+        thread::spawn(move || {
+            button.listen();
+            tracing::error!("Esp button stopped");
+            keep_running.store(false, Ordering::Relaxed);
+        });
+    }
 
     let trigger = use_trigger.clone();
     let auto_aim = use_auto_aim.clone();
@@ -214,7 +227,11 @@ fn main() -> Result<()> {
                                     / config.game_sens
                                     / config.mouse_dpi;
                                 let use_trigger = trigger.load(Ordering::Acquire);
-                                if (use_trigger && mouse.is_side4_pressing()) || (!use_trigger) {
+                                if (use_trigger
+                                    && (esp_button.load(Ordering::Acquire)
+                                        || mouse.is_side4_pressing()))
+                                    || (!use_trigger)
+                                {
                                     if config.makcu_mouse_lock_while_aim {
                                         mouse
                                             .batch()

@@ -163,7 +163,8 @@ impl MouseVirtual {
             match bytes_read {
                 Ok(bytes_read) => {
                     if bytes_read > 0 {
-                        buf.into_iter().for_each(|v| {
+                        buf[..bytes_read].iter().for_each(|v| {
+                            let v = *v;
                             if v != 0x0A && v != 0x0D && v < 32 {
                                 let changed = last_value ^ v;
                                 if changed > 0 {

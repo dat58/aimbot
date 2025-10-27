@@ -4,6 +4,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    thread,
     time::Duration,
 };
 
@@ -14,9 +15,28 @@ pub struct EspButton {
 
 impl EspButton {
     pub fn new(port: &str, is_pressed: Arc<AtomicBool>) -> Result<Self> {
-        let serial = serialport::new(port, 115200)
-            .timeout(Duration::from_millis(150))
-            .open()?;
+        let serial = match serialport::new(port, 115200)
+            .timeout(Duration::from_millis(300))
+            .open()
+        {
+            Ok(mut serial) => {
+                let mut buf = [0u8; 1];
+                loop {
+                    match serial.read(&mut buf) {
+                        Ok(_) => {
+                            drop(serial);
+                            thread::sleep(Duration::from_millis(300));
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                serialport::new(port, 115200)
+                    .timeout(Duration::from_millis(100))
+                    .open()?
+            }
+            Err(e) => Err(e)?,
+        };
         Ok(Self { serial, is_pressed })
     }
 

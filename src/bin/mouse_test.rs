@@ -1,19 +1,16 @@
-use aimbot::mouse::MouseVirtual;
-use std::{env, error::Error, sync::Arc, thread, time::Duration};
+use aimbot::{config::Config, mouse::MouseVirtual};
+use std::{error::Error, sync::Arc, thread, time::Duration};
 use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 fn main() -> Result<(), Box<dyn Error>> {
+    dotenv::dotenv().ok();
     tracing_subscriber::registry()
         .with(fmt::Layer::new().with_writer(std::io::stdout).with_filter(
             EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info"))?,
         ))
         .init();
-    let port = env::var("port").expect("Please set `port` as environment variable.");
-    let baud = env::var("baud")
-        .unwrap_or("4000000".to_string())
-        .parse::<u32>()
-        .expect("Baud rate is invalid.");
-    let mouse = Arc::new(MouseVirtual::new(&port, baud)?);
+    let config = Config::new();
+    let mouse = Arc::new(MouseVirtual::new(&config.makcu_port, config.makcu_baud)?);
     let mouse_clone = mouse.clone();
     thread::spawn(move || {
         mouse_clone.listen_button_presses();

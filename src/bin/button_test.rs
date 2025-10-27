@@ -1,4 +1,4 @@
-use aimbot::esp_button::EspButton;
+use aimbot::{config::Config, esp_button::EspButton};
 use std::{
     sync::{
         Arc,
@@ -22,10 +22,10 @@ fn main() {
         "{:?}",
         serialport::available_ports().expect("No serial ports found!")
     );
-    let port = std::env::var("port").expect("Please input an serial port");
+    let config = Config::new();
     let state = Arc::new(AtomicBool::new(false));
-    let mut esp_button =
-        EspButton::new(&port, state.clone()).expect("Failed to connect to ESP button");
+    let mut esp_button = EspButton::new(&config.esp_port.unwrap(), state.clone())
+        .expect("Failed to connect to ESP button");
     std::thread::spawn(move || {
         esp_button.listen();
     });

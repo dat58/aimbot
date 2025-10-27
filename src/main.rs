@@ -75,7 +75,7 @@ fn main() -> Result<()> {
     let capture_queue = frame_queue.clone();
     let keep_running = running.clone();
     thread::spawn(move || {
-        handle_capture(source_stream, capture_queue, 1000, Duration::from_millis(5));
+        handle_capture(source_stream, capture_queue, 1000, Duration::from_millis(2));
         tracing::error!("Capture stream stopped");
         keep_running.store(false, Ordering::Relaxed);
     });
@@ -84,6 +84,7 @@ fn main() -> Result<()> {
         let mut button = EspButton::new(&esp_port, esp_button.clone())?;
         let keep_running = running.clone();
         thread::spawn(move || {
+            tracing::info!("Start listening esp button");
             button.listen();
             tracing::error!("Esp button stopped");
             keep_running.store(false, Ordering::Relaxed);

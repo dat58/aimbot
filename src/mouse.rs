@@ -134,21 +134,11 @@ impl MouseVirtual {
     #[inline(always)]
     pub(crate) fn find_bezier(&self, dx: f64, dy: f64, random: &mut ThreadRng) -> (i32, i32, i32) {
         let pixel = (dx * dx + dy * dy).sqrt();
-        let steps = if pixel < 20. {
-            random.random_range(4..=15)
-        } else if pixel < 50. {
-            random.random_range(15..=35)
-        } else if pixel < 200. {
-            random.random_range(35..=100)
-        } else if pixel < 500. {
-            random.random_range(100..=250)
-        } else if pixel < 1200. {
-            random.random_range(250..=600)
-        } else {
-            random.random_range(600..=1200)
-        };
-        let ref_x = random.random_range(4..24);
-        let ref_y = random.random_range(4..24);
+        let lower = (pixel * 0.2) as i32;
+        let upper = (pixel * 0.55) as i32 + 1;
+        let steps = random.random_range(lower..=upper);
+        let ref_x = random.random_range(4..17);
+        let ref_y = random.random_range(4..17);
         (steps, ref_x, ref_y)
     }
 

@@ -9,6 +9,7 @@ use std::{
 use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 fn main() {
+    dotenv::dotenv().ok();
     tracing_subscriber::registry()
         .with(
             fmt::Layer::new().with_writer(std::io::stdout).with_filter(

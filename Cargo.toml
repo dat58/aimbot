@@ -22,10 +22,7 @@ ndi = { version = "0.1.2", optional = true }
 grafton-ndi = { git = "https://github.com/dat58/ndi", branch = "hotfix-0.8.1", version = "0.8.2", optional = true }
 lazy_static = { version = "1.5.0", optional = true }
 uuid = { version = "1.18.0", features = ["v4"] }
-
-
-[target.'cfg(not(target_env = "msvc"))'.dependencies]
-tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms", "background_threads"] }
+mimalloc = "0.1.48"
 
 [profile.release]
 lto = true

@@ -10,11 +10,16 @@ use std::{
 
 pub struct EspButton {
     serial: Box<dyn serialport::SerialPort>,
-    is_pressed: Arc<AtomicBool>,
+    is_pressed_1: Arc<AtomicBool>,
+    is_pressed_2: Arc<AtomicBool>,
 }
 
 impl EspButton {
-    pub fn new(port: &str, is_pressed: Arc<AtomicBool>) -> Result<Self> {
+    pub fn new(
+        port: &str,
+        is_pressed_1: Arc<AtomicBool>,
+        is_pressed_2: Arc<AtomicBool>,
+    ) -> Result<Self> {
         let serial = match serialport::new(port, 115200)
             .timeout(Duration::from_millis(300))
             .open()
@@ -37,30 +42,41 @@ impl EspButton {
             }
             Err(e) => Err(e)?,
         };
-        Ok(Self { serial, is_pressed })
-    }
-
-    pub fn is_pressed(&self) -> bool {
-        self.is_pressed.load(Ordering::Acquire)
+        Ok(Self {
+            serial,
+            is_pressed_1,
+            is_pressed_2,
+        })
     }
 
     pub fn listen(&mut self) {
         let mut buf = [0u8; 8];
-        let mut last_state = self.is_pressed();
+        let mut last_state_1 = self.is_pressed_1.load(Ordering::Acquire);
+        let mut last_state_2 = self.is_pressed_2.load(Ordering::Acquire);
         loop {
             match self.serial.read(&mut buf) {
                 Ok(count) if count > 0 => {
                     for i in 0..count {
-                        if buf[i] == 48 || buf[i] == 49 {
-                            if buf[i] == 49 {
-                                if last_state != true {
-                                    self.is_pressed.store(true, Ordering::Release);
-                                    last_state = true;
+                        if buf[i] >= 48 && buf[i] <= 51 {
+                            if buf[i] == 48 {
+                                if last_state_1 != false {
+                                    self.is_pressed_1.store(false, Ordering::Release);
+                                    last_state_1 = false;
+                                }
+                            } else if buf[i] == 49 {
+                                if last_state_1 != true {
+                                    self.is_pressed_1.store(true, Ordering::Release);
+                                    last_state_1 = true;
+                                }
+                            } else if buf[i] == 50 {
+                                if last_state_2 != false {
+                                    self.is_pressed_2.store(false, Ordering::Release);
+                                    last_state_2 = false;
                                 }
                             } else {
-                                if last_state != false {
-                                    self.is_pressed.store(false, Ordering::Release);
-                                    last_state = false;
+                                if last_state_2 != true {
+                                    self.is_pressed_2.store(true, Ordering::Release);
+                                    last_state_2 = true;
                                 }
                             }
                         }
@@ -75,7 +91,7 @@ impl EspButton {
                 }
                 _ => {}
             }
-            std::thread::sleep(Duration::from_millis(2));
+            thread::sleep(Duration::from_millis(2));
         }
     }
 }

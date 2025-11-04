@@ -24,23 +24,36 @@ fn main() {
         serialport::available_ports().expect("No serial ports found!")
     );
     let config = Config::new();
-    let state = Arc::new(AtomicBool::new(false));
-    let mut esp_button = EspButton::new(&config.esp_port.unwrap(), state.clone())
+    let state1 = Arc::new(AtomicBool::new(false));
+    let state2 = Arc::new(AtomicBool::new(false));
+    let mut esp_button = EspButton::new(&config.esp_port.unwrap(), state1.clone(), state2.clone())
         .expect("Failed to connect to ESP button");
     std::thread::spawn(move || {
         esp_button.listen();
     });
-    let mut last_state = state.load(Ordering::Acquire);
+    let mut last_state1 = state1.load(Ordering::Acquire);
+    let mut last_state2 = state1.load(Ordering::Acquire);
     loop {
-        let current_state = state.load(Ordering::Acquire);
-        if last_state != current_state {
-            if current_state {
-                println!("PRESSED");
+        let current_state1 = state1.load(Ordering::Acquire);
+        if last_state1 != current_state1 {
+            if current_state1 {
+                println!("[BUTTON 1] PRESSED");
             } else {
-                println!("RELEASED");
+                println!("[BUTTON 1] RELEASED");
             }
-            last_state = current_state;
+            last_state1 = current_state1;
         }
-        std::thread::sleep(Duration::from_millis(5));
+
+        let current_state2 = state2.load(Ordering::Acquire);
+        if last_state2 != current_state2 {
+            if current_state2 {
+                println!("[BUTTON 2] PRESSED");
+            } else {
+                println!("[BUTTON 2] RELEASED");
+            }
+            last_state2 = current_state2;
+        }
+
+        std::thread::sleep(Duration::from_millis(2));
     }
 }

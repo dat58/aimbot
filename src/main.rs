@@ -11,6 +11,7 @@ use aimbot::{
 };
 use anyhow::{Result, anyhow};
 use crossbeam::queue::ArrayQueue;
+use mimalloc::MiMalloc;
 use opencv::core::{Mat, MatTraitConst};
 use rand::prelude::*;
 use std::{
@@ -22,13 +23,10 @@ use std::{
     thread,
     time::Duration,
 };
-#[cfg(not(target_env = "msvc"))]
-use tikv_jemallocator::Jemalloc;
 use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-#[cfg(not(target_env = "msvc"))]
 #[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
+static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> Result<()> {
     dotenv::dotenv().ok();
@@ -69,7 +67,8 @@ fn main() -> Result<()> {
     let use_trigger = Arc::new(AtomicBool::new(true));
     let use_auto_aim = Arc::new(AtomicBool::new(true));
     let aim_mode = AimMode::default();
-    let esp_button = Arc::new(AtomicBool::new(false));
+    let esp_button1 = Arc::new(AtomicBool::new(false));
+    let esp_button2 = Arc::new(AtomicBool::new(false));
     let running = Arc::new(AtomicBool::new(true));
 
     let capture_queue = frame_queue.clone();
@@ -81,7 +80,7 @@ fn main() -> Result<()> {
     });
 
     if let Some(esp_port) = esp_port {
-        let mut button = EspButton::new(&esp_port, esp_button.clone())?;
+        let mut button = EspButton::new(&esp_port, esp_button1.clone(), esp_button2.clone())?;
         let keep_running = running.clone();
         thread::spawn(move || {
             tracing::info!("Start listening esp button");
@@ -209,7 +208,12 @@ fn main() -> Result<()> {
                         tracing::debug!("[Model] bboxes: {:?}", bboxes);
 
                         if bboxes.len() > 0 {
-                            let (destination, min_zone) = aim.aim(&bboxes).unwrap();
+                            // if esp button 2 is triggered it's always aim head
+                            let (destination, min_zone) = if esp_button2.load(Ordering::Acquire) {
+                                aim.aim_head(&bboxes).unwrap()
+                            } else {
+                                aim.aim(&bboxes).unwrap()
+                            };
                             let dist = destination.l2_distance(&crosshair).sqrt();
 
                             #[cfg(not(feature = "disable-mouse"))]
@@ -224,22 +228,11 @@ fn main() -> Result<()> {
                                     / config.mouse_dpi;
                                 let use_trigger = trigger.load(Ordering::Acquire);
                                 if (use_trigger
-                                    && (esp_button.load(Ordering::Acquire)
+                                    && (esp_button1.load(Ordering::Acquire)
                                         || mouse.is_side4_pressing()))
                                     || (!use_trigger)
                                 {
-                                    if config.makcu_mouse_lock_while_aim {
-                                        mouse
-                                            .batch()
-                                            .lock_mx()
-                                            .lock_my()
-                                            .move_bezier(dx, dy, &mut random)
-                                            .unlock_mx()
-                                            .unlock_my()
-                                            .run()?;
-                                    } else {
-                                        mouse.move_bezier(dx, dy, &mut random)?;
-                                    };
+                                    mouse.move_bezier(dx, dy, &mut random)?;
                                 }
                             }
 

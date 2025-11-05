@@ -21,7 +21,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -119,79 +119,82 @@ fn main() -> Result<()> {
                 tracing::info!("Mouse initialized");
 
                 let mouse = Arc::new(mouse);
-                let m = mouse.clone();
-                let running = keep_running_clone.clone();
-                thread::spawn(move || {
-                    tracing::info!("Start listening mouse button");
-                    m.listen_button_presses();
-                    running.store(false, Ordering::Relaxed);
-                });
 
-                let m = mouse.clone();
-                let trigger_clone = trigger.clone();
-                let auto_aim_clone = auto_aim.clone();
-                let running = keep_running_clone.clone();
-                thread::spawn(move || {
-                    tracing::info!("Start handling the switch trigger/auto_aim button");
-                    let f = Box::new(move || {
-                        let mut last_value = trigger_clone.load(Ordering::Acquire);
-                        last_value = !last_value;
-                        trigger_clone.store(last_value, Ordering::Release);
-                        // auto_aim always set to `true` every time trigger changed
-                        auto_aim_clone.store(true, Ordering::Release);
-                        tracing::info!("trigger modified to {}", last_value);
+                if config.makcu_listen {
+                    let m = mouse.clone();
+                    let running = keep_running_clone.clone();
+                    thread::spawn(move || {
+                        tracing::info!("Start listening mouse button");
+                        m.listen_button_presses();
+                        running.store(false, Ordering::Relaxed);
                     });
-                    m.handle_right_holding(
-                        // hold right mouse to switch
-                        // between trigger & auto aim bot
-                        Duration::from_millis(500),
-                        Duration::from_millis(50),
-                        f,
-                    );
-                    running.store(false, Ordering::Relaxed);
-                });
 
-                let m = mouse.clone();
-                let trigger_clone = trigger.clone();
-                let auto_aim_clone = auto_aim.clone();
-                let running = keep_running_clone.clone();
-                thread::spawn(move || {
-                    tracing::info!("Start handling the switch auto aim button side4");
-                    let f = Box::new(move || {
-                        if !trigger_clone.load(Ordering::Acquire) {
+                    let m = mouse.clone();
+                    let trigger_clone = trigger.clone();
+                    let auto_aim_clone = auto_aim.clone();
+                    let running = keep_running_clone.clone();
+                    thread::spawn(move || {
+                        tracing::info!("Start handling the switch trigger/auto_aim button");
+                        let f = Box::new(move || {
+                            let mut last_value = trigger_clone.load(Ordering::Acquire);
+                            last_value = !last_value;
+                            trigger_clone.store(last_value, Ordering::Release);
+                            // auto_aim always set to `true` every time trigger changed
                             auto_aim_clone.store(true, Ordering::Release);
-                            tracing::info!("Auto aim modified to true");
-                        }
+                            tracing::info!("trigger modified to {}", last_value);
+                        });
+                        m.handle_right_holding(
+                            // hold right mouse to switch
+                            // between trigger & auto aim bot
+                            Duration::from_millis(500),
+                            Duration::from_millis(50),
+                            f,
+                        );
+                        running.store(false, Ordering::Relaxed);
                     });
-                    m.handle_side4_holding(
-                        // hold side4 mouse button ~20 millis second `turn on` auto aim
-                        Duration::from_millis(0),
-                        Duration::from_millis(50),
-                        f,
-                    );
-                    running.store(false, Ordering::Relaxed);
-                });
 
-                let m = mouse.clone();
-                let trigger_clone = trigger.clone();
-                let auto_aim_clone = auto_aim.clone();
-                let running = keep_running_clone.clone();
-                thread::spawn(move || {
-                    tracing::info!("Start handling the switch auto aim button side5");
-                    let f = Box::new(move || {
-                        if !trigger_clone.load(Ordering::Acquire) {
-                            auto_aim_clone.store(false, Ordering::Release);
-                            tracing::info!("Auto aim modified to false");
-                        }
+                    let m = mouse.clone();
+                    let trigger_clone = trigger.clone();
+                    let auto_aim_clone = auto_aim.clone();
+                    let running = keep_running_clone.clone();
+                    thread::spawn(move || {
+                        tracing::info!("Start handling the switch auto aim button side4");
+                        let f = Box::new(move || {
+                            if !trigger_clone.load(Ordering::Acquire) {
+                                auto_aim_clone.store(true, Ordering::Release);
+                                tracing::info!("Auto aim modified to true");
+                            }
+                        });
+                        m.handle_side4_holding(
+                            // hold side4 mouse button ~20 millis second `turn on` auto aim
+                            Duration::from_millis(0),
+                            Duration::from_millis(50),
+                            f,
+                        );
+                        running.store(false, Ordering::Relaxed);
                     });
-                    m.handle_side5_holding(
-                        // hold side5 mouse button ~20 millis second `turn off` auto aim
-                        Duration::from_millis(0),
-                        Duration::from_millis(50),
-                        f,
-                    );
-                    running.store(false, Ordering::Relaxed);
-                });
+
+                    let m = mouse.clone();
+                    let trigger_clone = trigger.clone();
+                    let auto_aim_clone = auto_aim.clone();
+                    let running = keep_running_clone.clone();
+                    thread::spawn(move || {
+                        tracing::info!("Start handling the switch auto aim button side5");
+                        let f = Box::new(move || {
+                            if !trigger_clone.load(Ordering::Acquire) {
+                                auto_aim_clone.store(false, Ordering::Release);
+                                tracing::info!("Auto aim modified to false");
+                            }
+                        });
+                        m.handle_side5_holding(
+                            // hold side5 mouse button ~20 millis second `turn off` auto aim
+                            Duration::from_millis(0),
+                            Duration::from_millis(50),
+                            f,
+                        );
+                        running.store(false, Ordering::Relaxed);
+                    });
+                }
 
                 (mouse, rand::rng())
             };
@@ -232,7 +235,9 @@ fn main() -> Result<()> {
                                         || mouse.is_side4_pressing()))
                                     || (!use_trigger)
                                 {
+                                    let t = Instant::now();
                                     mouse.move_bezier(dx, dy, &mut random)?;
+                                    tracing::debug!("[Mouse] move took: {:?}", t.elapsed());
                                 }
                             }
 
@@ -360,10 +365,6 @@ fn main() -> Result<()> {
     })?;
     while running.load(Ordering::SeqCst) {
         thread::sleep(Duration::from_millis(1000));
-    }
-    if config.makcu_mouse_lock_while_aim {
-        let mouse = MouseVirtual::new(&makcu_port, makcu_baud)?;
-        mouse.batch().unlock_mx().unlock_my().run()?;
     }
     tracing::warn!("Server stopped.");
     Ok(())

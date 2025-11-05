@@ -45,7 +45,7 @@ pub struct Config {
 
     pub makcu_port: String,
     pub makcu_baud: u32,
-    pub makcu_mouse_lock_while_aim: bool,
+    pub makcu_listen: bool,
     pub mouse_dpi: f64,
     pub game_sens: f64,
 
@@ -145,10 +145,10 @@ impl Config {
             .unwrap_or("115200".to_string())
             .parse::<u32>()
             .expect("MAKCU_BAUD is not an integer");
-        let makcu_mouse_lock_while_aim = var("MAKCU_MOUSE_LOCK_WHILE_AIM")
+        let makcu_listen = var("MAKCU_LISTEN")
             .unwrap_or("false".to_string())
             .parse::<bool>()
-            .expect("MAKCU_MOUSE_LOCK_WHILE_AIM is not a bool");
+            .expect("MAKCU_LISTEN is not a bool");
         let mouse_dpi = var("MOUSE_DPI")
             .unwrap_or("1000.".to_string())
             .parse::<f64>()
@@ -192,7 +192,7 @@ impl Config {
             intra_threads,
             makcu_port,
             makcu_baud,
-            makcu_mouse_lock_while_aim,
+            makcu_listen,
             mouse_dpi,
             game_sens,
             esp_port,

@@ -1,6 +1,7 @@
 use std::{env::var, path::PathBuf};
 
 pub const SCALE_HEAD_Y: f32 = 0.8 / 6.;
+pub const SCALE_HEAD_X: f32 = 0.6;
 pub const SCALE_NECK_Y: f32 = 2.5 / 6.;
 pub const SCALE_CHEST_Y: f32 = 3.0 / 6.;
 pub const SCALE_ABDOMEN_Y: f32 = 5.0 / 6.;
@@ -27,6 +28,8 @@ pub struct Config {
     pub model_conf_body: f32,
     pub model_conf_head: f32,
     pub model_iou: f32,
+    pub build_head_iou: Option<f32>,
+
     pub gpu_id: Option<i32>,
     pub gpu_mem_limit: Option<usize>,
     pub trt_min_shapes: String,
@@ -116,6 +119,9 @@ impl Config {
             .expect("No MODEL_IOU specified")
             .parse::<f32>()
             .expect("MODEL_IOU is not a number");
+        let build_head_iou = var("BUILD_HEAD_IOU")
+            .ok()
+            .map(|o| o.parse::<f32>().expect("BUILD_HEAD_IOU is not a number"));
         let gpu_id = var("GPU_ID").ok().and_then(|s| s.parse::<i32>().ok());
         let gpu_mem_limit = var("GPU_MEM_LIMIT")
             .ok()
@@ -181,6 +187,7 @@ impl Config {
             model_conf_body,
             model_conf_head,
             model_iou,
+            build_head_iou,
             gpu_id,
             gpu_mem_limit,
             trt_min_shapes,

@@ -208,6 +208,9 @@ fn main() -> Result<()> {
                             let dist_b = crosshair.l2_distance(&b.cxcy());
                             dist_a.partial_cmp(&dist_b).unwrap()
                         });
+                        if let Some(build_head_iou) = config.build_head_iou {
+                            bboxes.build(build_head_iou);
+                        }
                         tracing::debug!("[Model] bboxes: {:?}", bboxes);
 
                         if bboxes.len() > 0 {

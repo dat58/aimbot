@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{Config, SCALE_HEAD_X, SCALE_HEAD_Y};
 use anyhow::Result;
 use ndarray::{Array, Axis, Ix2, s};
 use opencv::{
@@ -417,6 +417,37 @@ impl Bboxes {
         } else {
             self.class_1.push(bbox);
         }
+    }
+
+    pub fn build(&mut self, iou: f32) {
+        let mut class_1 = Vec::with_capacity(self.class_0.len());
+        let mut removed = Vec::with_capacity(self.class_1.len());
+        for i in 0..self.class_0.len() {
+            let mut max_iou = 0.0;
+            let mut max_index = -1;
+            for j in 0..self.class_1.len() {
+                if !removed.contains(&j) {
+                    let current_iou = self.class_0[i].iou(&self.class_1[j]);
+                    if current_iou >= iou && current_iou > max_iou {
+                        max_index = j as i32;
+                        max_iou = current_iou;
+                    }
+                }
+            }
+            if max_index != -1 {
+                class_1.push(self.class_1[max_index as usize]);
+                removed.push(max_index as usize);
+            } else {
+                let xmin =
+                    (1. - SCALE_HEAD_X) / 2. * self.class_0[i].width() + self.class_0[i].xmin();
+                let ymin = self.class_0[i].ymin();
+                let width = self.class_0[i].width() * SCALE_HEAD_X;
+                let height = self.class_0[i].height() * SCALE_HEAD_Y;
+                let bbox = Bbox::new(xmin, ymin, width, height, 1.0, 1);
+                class_1.push(bbox);
+            }
+        }
+        self.class_1 = class_1;
     }
 
     pub fn len(&self) -> usize {

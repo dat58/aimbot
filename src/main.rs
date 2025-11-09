@@ -212,7 +212,8 @@ fn main() -> Result<()> {
 
                         if bboxes.len() > 0 {
                             // if esp button 2 is triggered it's always aim head
-                            let (destination, min_zone) = if esp_button2.load(Ordering::Acquire) {
+                            let esp_button2_pressed = esp_button2.load(Ordering::Acquire);
+                            let (destination, min_zone) = if esp_button2_pressed {
                                 aim.aim_head(&bboxes).unwrap()
                             } else {
                                 aim.aim(&bboxes).unwrap()
@@ -232,12 +233,11 @@ fn main() -> Result<()> {
                                 let use_trigger = trigger.load(Ordering::Acquire);
                                 if (use_trigger
                                     && (esp_button1.load(Ordering::Acquire)
+                                        || esp_button2_pressed
                                         || mouse.is_side4_pressing()))
                                     || (!use_trigger)
                                 {
-                                    let t = Instant::now();
                                     mouse.move_bezier(dx, dy, &mut random)?;
-                                    tracing::debug!("[Mouse] move took: {:?}", t.elapsed());
                                 }
                             }
 

@@ -22,7 +22,7 @@ pub struct Model {
     input_name: String,
     output_name: String,
     input_size: usize,
-    conf: f32,
+    conf: [f32; 2],
     iou: f32,
     roi: Rect,
     crop: bool,
@@ -109,7 +109,7 @@ impl Model {
             input_name,
             output_name,
             input_size: config.model_input_size,
-            conf: config.model_conf,
+            conf: [config.model_conf_body, config.model_conf_head],
             iou: config.model_iou,
             roi: Rect::new(
                 config.region_left as i32,
@@ -178,7 +178,7 @@ impl Model {
             // confidence filter
             let scores = pred.slice(s![CXYWH_OFFSET..CXYWH_OFFSET + 2]);
             let class = if scores[0] > scores[1] { 0 } else { 1 };
-            if scores[class] < self.conf {
+            if scores[class] < self.conf[class] {
                 continue;
             }
             let bbox = pred.slice(s![0..CXYWH_OFFSET]);

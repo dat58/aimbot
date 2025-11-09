@@ -24,7 +24,8 @@ pub struct Config {
     pub model_provider: String,
     pub model_path: PathBuf,
     pub model_input_size: usize,
-    pub model_conf: f32,
+    pub model_conf_body: f32,
+    pub model_conf_head: f32,
     pub model_iou: f32,
     pub gpu_id: Option<i32>,
     pub gpu_mem_limit: Option<usize>,
@@ -103,10 +104,14 @@ impl Config {
             .expect("No MODEL_INPUT_SIZE specified")
             .parse::<usize>()
             .expect("MODEL_INPUT_SIZE is not a number");
-        let model_conf = var("MODEL_CONF")
-            .expect("No MODEL_CONF specified")
+        let model_conf_body = var("MODEL_CONF_BODY")
+            .expect("No MODEL_CONF_BODY specified")
             .parse::<f32>()
-            .expect("MODEL_CONF is not a number");
+            .expect("MODEL_CONF_BODY is not a number");
+        let model_conf_head = var("MODEL_CONF_HEAD")
+            .expect("No MODEL_CONF_HEAD specified")
+            .parse::<f32>()
+            .expect("MODEL_CONF_HEAD is not a number");
         let model_iou = var("MODEL_IOU")
             .expect("No MODEL_IOU specified")
             .parse::<f32>()
@@ -173,7 +178,8 @@ impl Config {
             model_provider,
             model_path,
             model_input_size,
-            model_conf,
+            model_conf_body,
+            model_conf_head,
             model_iou,
             gpu_id,
             gpu_mem_limit,

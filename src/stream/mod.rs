@@ -12,10 +12,11 @@ pub use ndi6::*;
 pub use udp::*;
 
 use anyhow::Result;
-use crossbeam::queue::ArrayQueue;
+use crossbeam::queue::{ArrayQueue, SegQueue};
 use opencv::core::Mat;
 use std::{
     sync::Arc,
+    thread,
     time::{Duration, Instant},
 };
 
@@ -38,12 +39,31 @@ pub fn handle_capture(
     retry_time: usize,
     retry_interval: Duration,
 ) {
+    let first_delay = std::env::var("CC_DELAY_MS")
+        .unwrap_or("50".to_string())
+        .parse::<u64>()
+        .expect("CC_DELAY must be a number");
+    let fake_cc_queue = Arc::new(SegQueue::<(Mat, Duration)>::new());
+    let cc_queue = fake_cc_queue.clone();
+    thread::spawn(move || {
+        loop {
+            if let Some((mat, duration)) = cc_queue.pop() {
+                thread::sleep(duration);
+                queue.force_push(mat);
+            }
+        }
+    });
     loop {
         let now = Instant::now();
         match cap.capture() {
             Ok(mat) => {
                 tracing::debug!("[Stream] captured took: {:?}", now.elapsed());
-                queue.force_push(mat);
+                if fake_cc_queue.is_empty() {
+                    tracing::warn!("[Stream] EMPTY CC QUEUE");
+                    fake_cc_queue.push((mat, Duration::from_millis(first_delay)));
+                } else {
+                    fake_cc_queue.push((mat, now.elapsed()));
+                }
             }
             Err(e) => {
                 tracing::error!("[Stream] {}, try reconnecting", e);
@@ -53,7 +73,7 @@ pub fn handle_capture(
                         reconnect_success = true;
                         break;
                     }
-                    std::thread::sleep(retry_interval);
+                    thread::sleep(retry_interval);
                 }
                 if reconnect_success {
                     continue;

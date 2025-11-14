@@ -3,6 +3,7 @@
 use aimbot::{
     aim::AimMode,
     config::{Config, WIN_DPI_SCALE_FACTOR},
+    esp_button::EspButton,
     event::start_event_listener,
     model::{Bbox, Model, Point2f},
     mouse::MouseVirtual,
@@ -10,7 +11,9 @@ use aimbot::{
 };
 use anyhow::{Result, anyhow};
 use crossbeam::queue::ArrayQueue;
+use mimalloc::MiMalloc;
 use opencv::core::{Mat, MatTraitConst};
+use rand::prelude::*;
 use std::{
     io::Write,
     sync::{
@@ -18,15 +21,12 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
-#[cfg(not(target_env = "msvc"))]
-use tikv_jemallocator::Jemalloc;
 use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-#[cfg(not(target_env = "msvc"))]
 #[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
+static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> Result<()> {
     dotenv::dotenv().ok();
@@ -44,6 +44,7 @@ fn main() -> Result<()> {
     let serving_port_event_listener = config.event_listener_port;
     let makcu_port = config.makcu_port.clone();
     let makcu_baud = config.makcu_baud;
+    let esp_port = config.esp_port.clone();
     let source_stream: Box<dyn StreamCapture> = if config.source_stream.starts_with("ndi://") {
         let source_stream = config
             .source_stream
@@ -63,22 +64,39 @@ fn main() -> Result<()> {
     };
     let model = Model::new(config.clone())?;
     let frame_queue = Arc::new(ArrayQueue::<Mat>::new(1));
-    let signal = Arc::new(AtomicBool::new(true));
+    let use_trigger = Arc::new(AtomicBool::new(true));
+    let use_auto_aim = Arc::new(AtomicBool::new(true));
     let aim_mode = AimMode::default();
+    let esp_button1 = Arc::new(AtomicBool::new(false));
+    let esp_button2 = Arc::new(AtomicBool::new(false));
     let running = Arc::new(AtomicBool::new(true));
 
     let capture_queue = frame_queue.clone();
     let keep_running = running.clone();
     thread::spawn(move || {
-        handle_capture(source_stream, capture_queue, 1000, Duration::from_millis(10));
+        handle_capture(source_stream, capture_queue, 1000, Duration::from_millis(2));
         tracing::error!("Capture stream stopped");
         keep_running.store(false, Ordering::Relaxed);
     });
 
-    let turn_on = signal.clone();
+    if let Some(esp_port) = esp_port {
+        let mut button = EspButton::new(&esp_port, esp_button1.clone(), esp_button2.clone())?;
+        let keep_running = running.clone();
+        thread::spawn(move || {
+            tracing::info!("Start listening esp button");
+            button.listen();
+            tracing::error!("Esp button stopped");
+            keep_running.store(false, Ordering::Relaxed);
+        });
+    }
+
+    let trigger = use_trigger.clone();
+    let auto_aim = use_auto_aim.clone();
     let aim = aim_mode.clone();
     #[cfg(not(feature = "disable-mouse"))]
     let keep_running = running.clone();
+    #[cfg(not(feature = "disable-mouse"))]
+    let keep_running_clone = keep_running.clone();
     thread::spawn(move || {
         let f = move || -> Result<(), anyhow::Error> {
             #[cfg(feature = "debug")]
@@ -93,17 +111,96 @@ fn main() -> Result<()> {
             }
 
             #[cfg(not(feature = "disable-mouse"))]
-            let mut mouse = {
+            let (mouse, mut random) = {
                 let mouse =
                     MouseVirtual::new(&config.makcu_port, config.makcu_baud).map_err(|err| {
                         anyhow!(format!("Mouse cannot not initialized due to {}", err))
                     })?;
                 tracing::info!("Mouse initialized");
-                mouse
+
+                let mouse = Arc::new(mouse);
+
+                if config.makcu_listen {
+                    let m = mouse.clone();
+                    let running = keep_running_clone.clone();
+                    thread::spawn(move || {
+                        tracing::info!("Start listening mouse button");
+                        m.listen_button_presses();
+                        running.store(false, Ordering::Relaxed);
+                    });
+
+                    let m = mouse.clone();
+                    let trigger_clone = trigger.clone();
+                    let auto_aim_clone = auto_aim.clone();
+                    let running = keep_running_clone.clone();
+                    thread::spawn(move || {
+                        tracing::info!("Start handling the switch trigger/auto_aim button");
+                        let f = Box::new(move || {
+                            let mut last_value = trigger_clone.load(Ordering::Acquire);
+                            last_value = !last_value;
+                            trigger_clone.store(last_value, Ordering::Release);
+                            // auto_aim always set to `true` every time trigger changed
+                            auto_aim_clone.store(true, Ordering::Release);
+                            tracing::info!("trigger modified to {}", last_value);
+                        });
+                        m.handle_right_holding(
+                            // hold right mouse to switch
+                            // between trigger & auto aim bot
+                            Duration::from_millis(500),
+                            Duration::from_millis(50),
+                            f,
+                        );
+                        running.store(false, Ordering::Relaxed);
+                    });
+
+                    let m = mouse.clone();
+                    let trigger_clone = trigger.clone();
+                    let auto_aim_clone = auto_aim.clone();
+                    let running = keep_running_clone.clone();
+                    thread::spawn(move || {
+                        tracing::info!("Start handling the switch auto aim button side4");
+                        let f = Box::new(move || {
+                            if !trigger_clone.load(Ordering::Acquire) {
+                                auto_aim_clone.store(true, Ordering::Release);
+                                tracing::info!("Auto aim modified to true");
+                            }
+                        });
+                        m.handle_side4_holding(
+                            // hold side4 mouse button ~20 millis second `turn on` auto aim
+                            Duration::from_millis(0),
+                            Duration::from_millis(50),
+                            f,
+                        );
+                        running.store(false, Ordering::Relaxed);
+                    });
+
+                    let m = mouse.clone();
+                    let trigger_clone = trigger.clone();
+                    let auto_aim_clone = auto_aim.clone();
+                    let running = keep_running_clone.clone();
+                    thread::spawn(move || {
+                        tracing::info!("Start handling the switch auto aim button side5");
+                        let f = Box::new(move || {
+                            if !trigger_clone.load(Ordering::Acquire) {
+                                auto_aim_clone.store(false, Ordering::Release);
+                                tracing::info!("Auto aim modified to false");
+                            }
+                        });
+                        m.handle_side5_holding(
+                            // hold side5 mouse button ~20 millis second `turn off` auto aim
+                            Duration::from_millis(0),
+                            Duration::from_millis(50),
+                            f,
+                        );
+                        running.store(false, Ordering::Relaxed);
+                    });
+                }
+
+                (mouse, rand::rng())
             };
 
             loop {
-                if turn_on.load(Ordering::Relaxed) {
+                if auto_aim.load(Ordering::Relaxed) {
                     if let Some(image) = frame_queue.pop() {
                         let mut bboxes = model.infer(&image)?;
                         bboxes.sort_by(|a, b| {
@@ -111,10 +208,19 @@ fn main() -> Result<()> {
                             let dist_b = crosshair.l2_distance(&b.cxcy());
                             dist_a.partial_cmp(&dist_b).unwrap()
                         });
+                        if let Some(build_head_iou) = config.build_head_iou {
+                            bboxes.build(build_head_iou);
+                        }
                         tracing::debug!("[Model] bboxes: {:?}", bboxes);
 
                         if bboxes.len() > 0 {
-                            let (destination, min_zone) = aim.aim(&bboxes).unwrap();
+                            // if esp button 2 is triggered it's always aim head
+                            let esp_button2_pressed = esp_button2.load(Ordering::Acquire);
+                            let (destination, min_zone) = if esp_button2_pressed {
+                                aim.aim_head(&bboxes).unwrap()
+                            } else {
+                                aim.aim(&bboxes).unwrap()
+                            };
                             let dist = destination.l2_distance(&crosshair).sqrt();
 
                             #[cfg(not(feature = "disable-mouse"))]
@@ -127,18 +233,15 @@ fn main() -> Result<()> {
                                     * WIN_DPI_SCALE_FACTOR
                                     / config.game_sens
                                     / config.mouse_dpi;
-                                if config.makcu_mouse_lock_while_aim {
-                                    mouse
-                                        .batch()
-                                        .lock_mx()
-                                        .lock_my()
-                                        .move_bezier(dx, dy)
-                                        .unlock_mx()
-                                        .unlock_my()
-                                        .run()?;
-                                } else {
-                                    mouse.move_bezier(dx, dy)?;
-                                };
+                                let use_trigger = trigger.load(Ordering::Acquire);
+                                if (use_trigger
+                                    && (esp_button1.load(Ordering::Acquire)
+                                        || esp_button2_pressed
+                                        || mouse.is_side4_pressing()))
+                                    || (!use_trigger)
+                                {
+                                    mouse.move_bezier(dx, dy, &mut random)?;
+                                }
                             }
 
                             #[cfg(feature = "debug")]
@@ -245,7 +348,13 @@ fn main() -> Result<()> {
 
     let keep_running = running.clone();
     thread::spawn(move || {
-        start_event_listener(signal, aim_mode, serving_port_event_listener).map_err(|err| {
+        start_event_listener(
+            use_trigger,
+            use_auto_aim,
+            aim_mode,
+            serving_port_event_listener,
+        )
+        .map_err(|err| {
             tracing::error!("Event listener stop due to {}", err);
             keep_running.store(false, Ordering::Relaxed);
             err
@@ -259,10 +368,6 @@ fn main() -> Result<()> {
     })?;
     while running.load(Ordering::SeqCst) {
         thread::sleep(Duration::from_millis(1000));
-    }
-    if config.makcu_mouse_lock_while_aim {
-        let mut mouse = MouseVirtual::new(&makcu_port, makcu_baud)?;
-        mouse.batch().unlock_mx().unlock_my().run()?;
     }
     tracing::warn!("Server stopped.");
     Ok(())

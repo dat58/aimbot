@@ -3,8 +3,8 @@ use anyhow::{Result, bail};
 use opencv::{
     core::Mat,
     videoio::{
-        CAP_PROP_FPS, CAP_PROP_FRAME_HEIGHT, CAP_PROP_FRAME_WIDTH, VideoCapture, VideoCaptureTrait,
-        VideoCaptureTraitConst, CAP_FFMPEG,
+        CAP_FFMPEG, CAP_PROP_FPS, CAP_PROP_FRAME_HEIGHT, CAP_PROP_FRAME_WIDTH, VideoCapture,
+        VideoCaptureTrait, VideoCaptureTraitConst,
     },
 };
 

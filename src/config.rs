@@ -1,6 +1,7 @@
 use std::{env::var, path::PathBuf};
 
-pub const SCALE_HEAD_Y: f32 = 0.8 / 6.;
+pub const SCALE_HEAD_Y: f32 = 1. / 6.;
+pub const SCALE_HEAD_X: f32 = 0.6;
 pub const SCALE_NECK_Y: f32 = 2.5 / 6.;
 pub const SCALE_CHEST_Y: f32 = 3.0 / 6.;
 pub const SCALE_ABDOMEN_Y: f32 = 5.0 / 6.;
@@ -24,8 +25,11 @@ pub struct Config {
     pub model_provider: String,
     pub model_path: PathBuf,
     pub model_input_size: usize,
-    pub model_conf: f32,
+    pub model_conf_body: f32,
+    pub model_conf_head: f32,
     pub model_iou: f32,
+    pub build_head_iou: Option<f32>,
+
     pub gpu_id: Option<i32>,
     pub gpu_mem_limit: Option<usize>,
     pub trt_min_shapes: String,
@@ -45,7 +49,7 @@ pub struct Config {
 
     pub makcu_port: String,
     pub makcu_baud: u32,
-    pub makcu_mouse_lock_while_aim: bool,
+    pub makcu_listen: bool,
     pub mouse_dpi: f64,
     pub game_sens: f64,
 
@@ -103,14 +107,21 @@ impl Config {
             .expect("No MODEL_INPUT_SIZE specified")
             .parse::<usize>()
             .expect("MODEL_INPUT_SIZE is not a number");
-        let model_conf = var("MODEL_CONF")
-            .expect("No MODEL_CONF specified")
+        let model_conf_body = var("MODEL_CONF_BODY")
+            .expect("No MODEL_CONF_BODY specified")
             .parse::<f32>()
-            .expect("MODEL_CONF is not a number");
+            .expect("MODEL_CONF_BODY is not a number");
+        let model_conf_head = var("MODEL_CONF_HEAD")
+            .expect("No MODEL_CONF_HEAD specified")
+            .parse::<f32>()
+            .expect("MODEL_CONF_HEAD is not a number");
         let model_iou = var("MODEL_IOU")
             .expect("No MODEL_IOU specified")
             .parse::<f32>()
             .expect("MODEL_IOU is not a number");
+        let build_head_iou = var("BUILD_HEAD_IOU")
+            .ok()
+            .map(|o| o.parse::<f32>().expect("BUILD_HEAD_IOU is not a number"));
         let gpu_id = var("GPU_ID").ok().and_then(|s| s.parse::<i32>().ok());
         let gpu_mem_limit = var("GPU_MEM_LIMIT")
             .ok()
@@ -145,10 +156,10 @@ impl Config {
             .unwrap_or("115200".to_string())
             .parse::<u32>()
             .expect("MAKCU_BAUD is not an integer");
-        let makcu_mouse_lock_while_aim = var("MAKCU_MOUSE_LOCK_WHILE_AIM")
+        let makcu_listen = var("MAKCU_LISTEN")
             .unwrap_or("false".to_string())
             .parse::<bool>()
-            .expect("MAKCU_MOUSE_LOCK_WHILE_AIM is not a bool");
+            .expect("MAKCU_LISTEN is not a bool");
         let mouse_dpi = var("MOUSE_DPI")
             .unwrap_or("1000.".to_string())
             .parse::<f64>()
@@ -173,8 +184,10 @@ impl Config {
             model_provider,
             model_path,
             model_input_size,
-            model_conf,
+            model_conf_body,
+            model_conf_head,
             model_iou,
+            build_head_iou,
             gpu_id,
             gpu_mem_limit,
             trt_min_shapes,
@@ -192,7 +205,7 @@ impl Config {
             intra_threads,
             makcu_port,
             makcu_baud,
-            makcu_mouse_lock_while_aim,
+            makcu_listen,
             mouse_dpi,
             game_sens,
             esp_port,

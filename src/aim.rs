@@ -43,7 +43,13 @@ impl AimMode {
 
     pub fn aim_head(&self, bboxes: &Bboxes) -> Option<(Point2f, f32)> {
         match bboxes.class_1.first() {
-            Some(bbox) => Some((bbox.cxcy(), (bbox.width() / 2.).max(bbox.height() / 2.))),
+            Some(bbox) => Some((
+                Point2f::new(
+                    (bbox.xmax() + bbox.xmin()) / 2.,
+                    bbox.ymax() - bbox.height() / 3.,
+                ),
+                (bbox.width() / 2.).max(bbox.height() / 2.),
+            )),
             _ => match bboxes.class_0.first() {
                 Some(bbox) => Some((
                     bbox.cxcy_scale(None, Some(SCALE_HEAD_Y)),
@@ -98,7 +104,7 @@ impl AimMode {
 
 impl Default for AimMode {
     fn default() -> Self {
-        Self(Arc::new(AtomicU8::new(0)))
+        Self(Arc::new(AtomicU8::new(2)))
     }
 }
 

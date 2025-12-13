@@ -51,8 +51,10 @@ pub struct Config {
     pub makcu_port: String,
     pub makcu_baud: u32,
     pub makcu_listen: bool,
+    pub makcu_auto_aim_switch: bool,
     pub mouse_dpi: f64,
     pub game_sens: f64,
+    pub auto_shoot_range: (u64, u64),
 
     pub esp_port: Option<String>,
 }
@@ -174,6 +176,17 @@ impl Config {
             .parse::<f64>()
             .expect("GAME_SENS is not a number");
         let esp_port = var("ESP_PORT").ok();
+        let makcu_auto_aim_switch = var("MAKCU_AUTO_AIM_SWITCH")
+            .unwrap_or("false".to_string())
+            .parse::<bool>()
+            .expect("MAKCU_AUTO_AIM_SWITCH is not a bool");
+        let auto_shoot_range = var("AUTO_SHOOT_RANGE")
+            .unwrap_or("90,130".to_string())
+            .split(',')
+            .into_iter()
+            .map(|s| s.parse::<u64>().unwrap())
+            .collect::<Vec<u64>>();
+        let auto_shoot_range = (auto_shoot_range[0], auto_shoot_range[1]);
         Self {
             event_listener_port,
             source_stream,
@@ -214,6 +227,8 @@ impl Config {
             makcu_listen,
             mouse_dpi,
             game_sens,
+            makcu_auto_aim_switch,
+            auto_shoot_range,
             esp_port,
         }
     }

@@ -217,14 +217,16 @@ fn main() -> Result<()> {
                             // if esp button 2 is triggered it's always aim head
                             let esp_button2_pressed = esp_button2.load(Ordering::Acquire);
                             let (destination, min_zone) = if esp_button2_pressed {
-                                aim.aim_head(&bboxes).unwrap()
+                                let (destination, min_zone) = aim.aim_head(&bboxes).unwrap();
+                                (destination, min_zone * config.scale_min_zone2)
                             } else {
-                                aim.aim(&bboxes).unwrap()
+                                let (destination, min_zone) = aim.aim(&bboxes).unwrap();
+                                (destination, min_zone * config.scale_min_zone1)
                             };
                             let dist = destination.l2_distance(&crosshair).sqrt();
 
                             #[cfg(not(feature = "disable-mouse"))]
-                            if dist > min_zone * config.scale_min_zone {
+                            if dist > min_zone {
                                 let dx = (destination.x() - crosshair.x()) as f64
                                     * WIN_DPI_SCALE_FACTOR
                                     / config.game_sens

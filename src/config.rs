@@ -20,7 +20,8 @@ pub struct Config {
     pub region_left: u32,
     pub region_width: u32,
     pub region_height: u32,
-    pub scale_min_zone: f32,
+    pub scale_min_zone1: f32,
+    pub scale_min_zone2: f32,
 
     pub model_provider: String,
     pub model_path: PathBuf,
@@ -94,10 +95,14 @@ impl Config {
             .unwrap_or("0".to_string())
             .parse::<u32>()
             .expect("REGION_HEIGHT is not a number");
-        let scale_min_zone = var("SCALE_MIN_ZONE")
-            .unwrap_or("0.85".to_string())
+        let scale_min_zone1 = var("SCALE_MIN_ZONE1")
+            .unwrap_or("0.5".to_string())
             .parse::<f32>()
-            .expect("SCALE_MIN_ZONE is not a number");
+            .expect("SCALE_MIN_ZONE1 is not a number");
+        let scale_min_zone2 = var("SCALE_MIN_ZONE2")
+            .unwrap_or("0.8".to_string())
+            .parse::<f32>()
+            .expect("SCALE_MIN_ZONE2 is not a number");
         let model_provider = var("MODEL_PROVIDER").unwrap_or("cpu".to_string());
         let model_path = PathBuf::from(var("MODEL_PATH").expect("No MODEL_PATH specified"));
         if !model_path.is_file() {
@@ -180,7 +185,8 @@ impl Config {
             region_left,
             region_width,
             region_height,
-            scale_min_zone,
+            scale_min_zone1,
+            scale_min_zone2,
             model_provider,
             model_path,
             model_input_size,

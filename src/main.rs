@@ -273,8 +273,8 @@ fn main() -> Result<()> {
                                     * WIN_DPI_SCALE_FACTOR
                                     / config.game_sens
                                     / config.mouse_dpi;
-                                let use_trigger = trigger.load(Ordering::Acquire);
-                                if use_trigger {
+                                
+                                if trigger.load(Ordering::Acquire) {
                                     if esp_button2_pressed || esp_button1.load(Ordering::Acquire) {
                                         coord_queue.force_push((dx, dy, false));
                                     } else if mouse.is_side4_pressing() {

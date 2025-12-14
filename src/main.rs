@@ -124,6 +124,7 @@ fn main() -> Result<()> {
                 let m = mouse.clone();
                 let running = keep_running_clone.clone();
                 let move_point_queue = coord_queue.clone();
+                let makcu_listen = config.makcu_listen;
                 thread::spawn(move || {
                     tracing::info!("Start auto shooting");
                     let mouse = m;
@@ -138,7 +139,7 @@ fn main() -> Result<()> {
                                     stop = true;
                                 })
                                 .unwrap();
-                            if mouse.is_side4_pressing() {
+                            if makcu_listen && mouse.is_side4_pressing() {
                                 let pending = random.random_range(
                                     config.auto_shoot_range.0..=config.auto_shoot_range.1,
                                 );

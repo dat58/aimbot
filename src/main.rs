@@ -69,7 +69,7 @@ fn main() -> Result<()> {
     let aim_mode = AimMode::default();
     let esp_button1 = Arc::new(AtomicBool::new(false));
     let esp_button2 = Arc::new(AtomicBool::new(false));
-    let coord_queue = Arc::new(ArrayQueue::<(f64, f64)>::new(1));
+    let coord_queue = Arc::new(ArrayQueue::<(f64, f64, bool)>::new(1));
     let running = Arc::new(AtomicBool::new(true));
 
     let capture_queue = frame_queue.clone();
@@ -124,14 +124,13 @@ fn main() -> Result<()> {
                 let m = mouse.clone();
                 let running = keep_running_clone.clone();
                 let move_point_queue = coord_queue.clone();
-                let makcu_listen = config.makcu_listen;
                 thread::spawn(move || {
                     tracing::info!("Start auto shooting");
                     let mouse = m;
                     let mut random = rand::rng();
                     let mut stop = false;
                     while !stop {
-                        if let Some((dx, dy)) = move_point_queue.pop() {
+                        if let Some((dx, dy, auto_click)) = move_point_queue.pop() {
                             mouse
                                 .move_bezier(dx, dy, &mut random)
                                 .map_err(|err| {
@@ -139,7 +138,7 @@ fn main() -> Result<()> {
                                     stop = true;
                                 })
                                 .unwrap();
-                            if makcu_listen && mouse.is_side4_pressing() {
+                            if auto_click {
                                 let pending = random.random_range(
                                     config.auto_shoot_range.0..=config.auto_shoot_range.1,
                                 );
@@ -275,13 +274,14 @@ fn main() -> Result<()> {
                                     / config.game_sens
                                     / config.mouse_dpi;
                                 let use_trigger = trigger.load(Ordering::Acquire);
-                                if (use_trigger
-                                    && (esp_button1.load(Ordering::Acquire)
-                                        || esp_button2_pressed
-                                        || mouse.is_side4_pressing()))
-                                    || (!use_trigger)
-                                {
-                                    coord_queue.force_push((dx, dy)).unwrap();
+                                if use_trigger {
+                                    if esp_button2_pressed || esp_button1.load(Ordering::Acquire) {
+                                        coord_queue.force_push((dx, dy, false));
+                                    } else if mouse.is_side4_pressing() {
+                                        coord_queue.force_push((dx, dy, true));
+                                    }
+                                } else {
+                                    coord_queue.force_push((dx, dy, false));
                                 }
                             }
 

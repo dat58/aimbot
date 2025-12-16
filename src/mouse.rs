@@ -117,7 +117,9 @@ impl MouseVirtual {
     #[inline(always)]
     fn cmd(&self, command: &str) -> Result<()> {
         let mut serial = self.serial.lock().expect("Failed to lock serial port");
-        Ok(serial.write_all(format!("{command}{CRLF}").as_bytes())?)
+        serial.write_all(format!("{command}{CRLF}").as_bytes())?;
+        serial.flush()?;
+        Ok(())
     }
 
     pub fn move_shift(&self, dx: f64, dy: f64) -> Result<()> {

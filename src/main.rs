@@ -143,13 +143,27 @@ fn main() -> Result<()> {
                                     config.auto_shoot_range.0..=config.auto_shoot_range.1,
                                 );
                                 thread::sleep(Duration::from_millis(pending));
-                                mouse
-                                    .click_left()
-                                    .map_err(|err| {
-                                        tracing::error!("Failed to click: {:?}", err);
-                                        stop = true;
-                                    })
-                                    .unwrap();
+                                for _ in 0..5 {
+                                    mouse
+                                        .click_left()
+                                        .map_err(|err| {
+                                            tracing::error!("Failed to click: {:?}", err);
+                                            stop = true;
+                                        })
+                                        .unwrap();
+                                    let dx = random.random_range(-1..=1) as f64;
+                                    let dy = random.random_range(3..=6) as f64;
+                                    mouse
+                                        .move_bezier(dx, dy, &mut random)
+                                        .map_err(|err| {
+                                            tracing::error!("Failed to move point: {:?}", err);
+                                            stop = true;
+                                        })
+                                        .unwrap();
+                                    thread::sleep(Duration::from_millis(
+                                        random.random_range(10..=50),
+                                    ));
+                                }
                             }
                         }
                     }
@@ -273,7 +287,7 @@ fn main() -> Result<()> {
                                     * WIN_DPI_SCALE_FACTOR
                                     / config.game_sens
                                     / config.mouse_dpi;
-                                
+
                                 if trigger.load(Ordering::Acquire) {
                                     if esp_button2_pressed || esp_button1.load(Ordering::Acquire) {
                                         coord_queue.force_push((dx, dy, false));

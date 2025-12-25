@@ -15,7 +15,7 @@ const BAUD_CHANGE_COMMAND: [u8; 9] = [0xDE, 0xAD, 0x05, 0x00, 0xA5, 0x00, 0x09, 
 const VERIFY_COMMAND: &[u8] = b"km.version()\r\n";
 const DEFAULT_BAUD_RATE: u32 = 115_200;
 const ALLOWED_BAUD_RATE: [u32; 3] = [115_200, 2_000_000, 4_000_000];
-const CRLF: &str = "\r\n";
+const CRLF: &str = "\r";
 
 pub struct MouseVirtual {
     serial: Mutex<Box<dyn SerialPort>>,
@@ -294,7 +294,9 @@ impl MouseVirtual {
     }
 
     pub fn click_left(&self) -> Result<()> {
-        self.cmd(format!("km.left(1){CRLF}km.left(0)").as_str())
+        self.cmd("km.left(1)")?;
+        self.cmd("km.left(0)")?;
+        Ok(())
     }
 
     pub fn click_right(&self) -> Result<()> {

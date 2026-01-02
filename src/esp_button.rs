@@ -91,7 +91,7 @@ impl EspButton {
                 }
                 _ => {}
             }
-            thread::sleep(Duration::from_millis(2));
+            thread::sleep(Duration::from_micros(500));
         }
     }
 }

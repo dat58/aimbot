@@ -172,7 +172,7 @@ impl MouseVirtual {
                 }
                 _ => {}
             }
-            sleep(Duration::from_millis(2));
+            sleep(Duration::from_millis(1));
         }
     }
 

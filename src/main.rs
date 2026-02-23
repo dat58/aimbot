@@ -74,7 +74,7 @@ fn main() -> Result<()> {
     let capture_queue = frame_queue.clone();
     let keep_running = running.clone();
     thread::spawn(move || {
-        handle_capture(source_stream, capture_queue, 1000, Duration::from_millis(2));
+        handle_capture(source_stream, capture_queue, 10000, Duration::from_millis(2));
         tracing::error!("Capture stream stopped");
         keep_running.store(false, Ordering::Relaxed);
     });

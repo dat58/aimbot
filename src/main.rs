@@ -7,7 +7,7 @@ use aimbot::{
     event::start_event_listener,
     model::{Bbox, Model, Point2f},
     mouse::MouseVirtual,
-    stream::{NDI, StreamCapture, UDP, handle_capture},
+    stream::{Elgato, NDI, StreamCapture, UDP, handle_capture},
 };
 use anyhow::{Result, anyhow};
 use crossbeam::queue::ArrayQueue;
@@ -59,6 +59,15 @@ fn main() -> Result<()> {
             config.ndi_source_name.clone(),
             config.ndi_timeout,
         )?)
+    } else if let Some(device) = config
+        .source_stream
+        .trim()
+        .strip_prefix("elgato://")
+        .or_else(|| config.source_stream.trim().strip_prefix("v4l2://"))
+    {
+        // `elgato://` on its own falls back to CAPTURE_DEVICE.
+        let device = (!device.is_empty()).then_some(device);
+        Box::new(Elgato::new(&config, device)?)
     } else {
         Box::new(UDP::new(config.source_stream.as_str())?)
     };
@@ -74,7 +83,12 @@ fn main() -> Result<()> {
     let capture_queue = frame_queue.clone();
     let keep_running = running.clone();
     thread::spawn(move || {
-        handle_capture(source_stream, capture_queue, 10000, Duration::from_millis(2));
+        handle_capture(
+            source_stream,
+            capture_queue,
+            10000,
+            Duration::from_millis(2),
+        );
         tracing::error!("Capture stream stopped");
         keep_running.store(false, Ordering::Relaxed);
     });

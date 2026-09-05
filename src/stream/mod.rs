@@ -1,9 +1,12 @@
+pub mod elgato;
 mod ndi;
 #[cfg(feature = "ndi4")]
 mod ndi4;
 #[cfg(feature = "ndi6")]
 mod ndi6;
 mod udp;
+pub mod v4l2;
+pub use elgato::Elgato;
 pub use ndi::*;
 #[cfg(feature = "ndi4")]
 pub use ndi4::*;

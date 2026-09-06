@@ -15,6 +15,7 @@ pub enum Event {
     AimModeAbdomen,
     UseTrigger,
     UseAutoAim,
+    AimModeHorizon,
 }
 
 #[put("/stream/event/{id}")]
@@ -54,6 +55,10 @@ async fn event(
                 Event::AimModeAbdomen => {
                     aim_mode.set_mode(Mode::Abdomen);
                     tracing::info!("[Event] change to aim mode Abdomen.");
+                }
+                Event::AimModeHorizon => {
+                    aim_mode.set_mode(Mode::Horizon);
+                    tracing::info!("[Event] change to aim mode Horizon.");
                 }
                 Event::UseTrigger => {
                     use_trigger.store(true, Ordering::SeqCst);
@@ -160,6 +165,13 @@ async fn board() -> impl Responder {
                 class="button-style bg-orange-600 hover:bg-orange-700 active:bg-orange-800"
                 onclick="sendEvent('7')">
                 <span class="text-lg mr-2">🤖</span> Use Auto Aim
+            </button>
+            
+            <!-- NEW 8: AimModeHorizon Button -->
+            <button
+                class="button-style bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800"
+                onclick="sendEvent('8')">
+                <span class="text-lg mr-2">🤖</span> Aim Horizone
             </button>
 
         </div>
@@ -308,6 +320,7 @@ impl TryFrom<&str> for Event {
             | "5" => Ok(Event::AimModeAbdomen),
             "trigger" | "Trigger" | "6" => Ok(Event::UseTrigger),
             "auto_aim" | "autoAim" | "AutoAim" | "7" => Ok(Event::UseAutoAim),
+            "horizon" | "8" => Ok(Event::AimModeHorizon),
             _ => Err(value.to_string()),
         }
     }

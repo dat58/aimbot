@@ -299,7 +299,7 @@ impl MouseVirtual {
         self.cmd(format!("km.right(1){CRLF}km.right(0)").as_str())
     }
 
-    pub fn batch(&self) -> BatchCommands {
+    pub fn batch(&self) -> BatchCommands<'_> {
         BatchCommands::new(self)
     }
 }

@@ -1,7 +1,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 use aimbot::{
-    aim::AimMode,
+    aim::{AimMode, Mode},
     config::{Config, WIN_DPI_SCALE_FACTOR},
     esp_button::EspButton,
     event::start_event_listener,
@@ -75,7 +75,11 @@ fn main() -> Result<()> {
     let frame_queue = Arc::new(ArrayQueue::<Mat>::new(1));
     let use_trigger = Arc::new(AtomicBool::new(true));
     let use_auto_aim = Arc::new(AtomicBool::new(true));
-    let aim_mode = AimMode::default();
+    let aim_mode = match config.default_aim_mode {
+        Some(mode) => AimMode::from(Mode::from(mode)),
+        _ => AimMode::default(),
+    };
+    tracing::info!("[main] Start app with aim mode {aim_mode}");
     let esp_button1 = Arc::new(AtomicBool::new(false));
     let esp_button2 = Arc::new(AtomicBool::new(false));
     let running = Arc::new(AtomicBool::new(true));
@@ -125,7 +129,7 @@ fn main() -> Result<()> {
             }
 
             #[cfg(not(feature = "disable-mouse"))]
-            let (mouse, mut random) = {
+            let mouse = {
                 let mouse =
                     MouseVirtual::new(&config.makcu_port, config.makcu_baud).map_err(|err| {
                         anyhow!(format!("Mouse cannot not initialized due to {}", err))
@@ -210,8 +214,10 @@ fn main() -> Result<()> {
                     });
                 }
 
-                (mouse, rand::rng())
+                mouse
             };
+
+            let mut random = rand::rng();
 
             loop {
                 if auto_aim.load(Ordering::Relaxed) {
@@ -234,13 +240,14 @@ fn main() -> Result<()> {
                                 let (destination, min_zone) = aim.aim_head(&bboxes).unwrap();
                                 (destination, min_zone * config.scale_min_zone2)
                             } else {
-                                let (destination, min_zone) = aim.aim(&bboxes).unwrap();
+                                let (destination, min_zone) =
+                                    aim.aim(&bboxes, &crosshair, &mut random).unwrap();
                                 (destination, min_zone * config.scale_min_zone1)
                             };
                             let dist = destination.l2_distance(&crosshair).sqrt();
 
                             #[cfg(not(feature = "disable-mouse"))]
-                            if dist > min_zone {
+                            if dist > min_zone && dist <= config.fov {
                                 let dx = (destination.x() - crosshair.x()) as f64
                                     * WIN_DPI_SCALE_FACTOR
                                     / config.game_sens

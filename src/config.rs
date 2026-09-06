@@ -24,6 +24,8 @@ pub struct Config {
     pub region_height: u32,
     pub scale_min_zone1: f32,
     pub scale_min_zone2: f32,
+    /// condition to trigger, if fov <= L2 distance -> allow trigger
+    pub fov: f32,
 
     pub model_provider: String,
     pub model_path: PathBuf,
@@ -71,6 +73,7 @@ pub struct Config {
     pub game_sens: f64,
 
     pub esp_port: Option<String>,
+    pub default_aim_mode: Option<u8>,
 }
 
 impl Config {
@@ -231,6 +234,13 @@ impl Config {
             .parse::<f64>()
             .expect("GAME_SENS is not a number");
         let esp_port = var("ESP_PORT").ok();
+        let fov = var("FOV")
+            .unwrap_or((screen_width as f32).to_string())
+            .parse()
+            .unwrap();
+        let default_aim_mode = var("DEFAULT_AIM_MODE")
+            .ok()
+            .and_then(|v| Some(v.parse::<u8>().expect("DEFAULT_AIM_MODE is not a u8")));
         Self {
             event_listener_port,
             source_stream,
@@ -282,6 +292,8 @@ impl Config {
             mouse_dpi,
             game_sens,
             esp_port,
+            fov,
+            default_aim_mode,
         }
     }
 }

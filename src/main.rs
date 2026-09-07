@@ -1,13 +1,13 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 use aimbot::{
-    aim::AimMode,
+    aim::{AimMode, Mode},
     config::{Config, WIN_DPI_SCALE_FACTOR},
     esp_button::EspButton,
     event::start_event_listener,
     model::{Bbox, Model, Point2f},
     mouse::MouseVirtual,
-    stream::{NDI, StreamCapture, UDP, handle_capture},
+    stream::{Elgato, NDI, StreamCapture, UDP, handle_capture},
 };
 use anyhow::{Result, anyhow};
 use crossbeam::queue::ArrayQueue;
@@ -59,6 +59,15 @@ fn main() -> Result<()> {
             config.ndi_source_name.clone(),
             config.ndi_timeout,
         )?)
+    } else if let Some(device) = config
+        .source_stream
+        .trim()
+        .strip_prefix("elgato://")
+        .or_else(|| config.source_stream.trim().strip_prefix("v4l2://"))
+    {
+        // `elgato://` on its own falls back to CAPTURE_DEVICE.
+        let device = (!device.is_empty()).then_some(device);
+        Box::new(Elgato::new(&config, device)?)
     } else {
         Box::new(UDP::new(config.source_stream.as_str())?)
     };
@@ -66,7 +75,11 @@ fn main() -> Result<()> {
     let frame_queue = Arc::new(ArrayQueue::<Mat>::new(1));
     let use_trigger = Arc::new(AtomicBool::new(true));
     let use_auto_aim = Arc::new(AtomicBool::new(true));
-    let aim_mode = AimMode::default();
+    let aim_mode = match config.default_aim_mode {
+        Some(mode) => AimMode::from(Mode::from(mode)),
+        _ => AimMode::default(),
+    };
+    tracing::info!("[main] Start app with aim mode {aim_mode}");
     let esp_button1 = Arc::new(AtomicBool::new(false));
     let esp_button2 = Arc::new(AtomicBool::new(false));
     let running = Arc::new(AtomicBool::new(true));
@@ -74,7 +87,12 @@ fn main() -> Result<()> {
     let capture_queue = frame_queue.clone();
     let keep_running = running.clone();
     thread::spawn(move || {
-        handle_capture(source_stream, capture_queue, 10000, Duration::from_millis(2));
+        handle_capture(
+            source_stream,
+            capture_queue,
+            10000,
+            Duration::from_millis(2),
+        );
         tracing::error!("Capture stream stopped");
         keep_running.store(false, Ordering::Relaxed);
     });
@@ -111,7 +129,7 @@ fn main() -> Result<()> {
             }
 
             #[cfg(not(feature = "disable-mouse"))]
-            let (mouse, mut random) = {
+            let mouse = {
                 let mouse =
                     MouseVirtual::new(&config.makcu_port, config.makcu_baud).map_err(|err| {
                         anyhow!(format!("Mouse cannot not initialized due to {}", err))
@@ -196,8 +214,10 @@ fn main() -> Result<()> {
                     });
                 }
 
-                (mouse, rand::rng())
+                mouse
             };
+
+            let mut random = rand::rng();
 
             loop {
                 if auto_aim.load(Ordering::Relaxed) {
@@ -220,13 +240,14 @@ fn main() -> Result<()> {
                                 let (destination, min_zone) = aim.aim_head(&bboxes).unwrap();
                                 (destination, min_zone * config.scale_min_zone2)
                             } else {
-                                let (destination, min_zone) = aim.aim(&bboxes).unwrap();
+                                let (destination, min_zone) =
+                                    aim.aim(&bboxes, &crosshair, &mut random).unwrap();
                                 (destination, min_zone * config.scale_min_zone1)
                             };
                             let dist = destination.l2_distance(&crosshair).sqrt();
 
                             #[cfg(not(feature = "disable-mouse"))]
-                            if dist > min_zone {
+                            if dist > min_zone && dist <= config.fov {
                                 let dx = (destination.x() - crosshair.x()) as f64
                                     * WIN_DPI_SCALE_FACTOR
                                     / config.game_sens

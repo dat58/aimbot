@@ -48,6 +48,11 @@ pub struct Config {
     pub capture_drop_stale: bool,
     pub capture_timeout: Duration,
     pub capture_output: OutputFormat,
+    /// Hand only `REGION_*` downstream instead of the whole frame. The
+    /// detection pipeline never looks outside that region, so converting or
+    /// JPEG-decoding the rest is pure latency. Turn it off for the `debug`
+    /// feature's whole-frame bbox overlay.
+    pub capture_roi: bool,
 
     pub gpu_id: Option<i32>,
     pub gpu_mem_limit: Option<usize>,
@@ -187,6 +192,10 @@ impl Config {
         );
         let capture_output = OutputFormat::parse(&var("CAPTURE_OUTPUT").unwrap_or_default())
             .expect("CAPTURE_OUTPUT is not valid");
+        let capture_roi = var("CAPTURE_ROI")
+            .unwrap_or("true".to_string())
+            .parse::<bool>()
+            .expect("CAPTURE_ROI is not a bool");
         let gpu_id = var("GPU_ID").ok().and_then(|s| s.parse::<i32>().ok());
         let gpu_mem_limit = var("GPU_MEM_LIMIT")
             .ok()
@@ -271,6 +280,7 @@ impl Config {
             capture_drop_stale,
             capture_timeout,
             capture_output,
+            capture_roi,
             gpu_id,
             gpu_mem_limit,
             trt_min_shapes,

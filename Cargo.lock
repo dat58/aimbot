@@ -231,6 +231,7 @@ dependencies = [
  "actix-cors",
  "actix-web",
  "anyhow",
+ "cc",
  "crossbeam",
  "ctrlc",
  "dotenv",

@@ -2,7 +2,7 @@ use crate::config::{Config, SCALE_HEAD_X, SCALE_HEAD_Y};
 use anyhow::{Result, bail};
 use ndarray::{Array, Axis, Ix2, s};
 use opencv::{
-    core::{Mat, MatTraitConst, MatTraitConstManual, Rect, Size, VecN},
+    core::{Mat, MatTraitConst, MatTraitConstManual, Point, Rect, Size, VecN},
     imgproc::{InterpolationFlags, resize},
 };
 use ort::{
@@ -19,6 +19,87 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::time::Instant;
 
+/// How the incoming frame maps onto the screen.
+///
+/// The three fields come apart when the capture layer already cropped the frame
+/// down to `REGION_*` (`CAPTURE_ROI`): `read` then covers the whole frame,
+/// while `origin` and `bound` still speak screen coordinates so detections land
+/// where the crosshair does.
+#[derive(Clone, Copy, Debug)]
+struct Source {
+    /// Rect to sample inside the frame.
+    read: Rect,
+    /// Screen-space position of `read`, added back onto every detection.
+    origin: Point,
+    /// Screen-space extent detections are clamped to.
+    bound: Size,
+    /// Screen-space position of the *frame*, which is not the same thing as
+    /// `origin`: reading a region out of a whole frame leaves the frame itself
+    /// at `(0, 0)`. Only a frame the capture layer already cropped down to the
+    /// region sits at the region's origin. Anything drawing a screen-space
+    /// detection onto the frame subtracts this.
+    frame_origin: Point,
+}
+
+/// Where to read from a `frame_w` x `frame_h` frame, and how to put detections
+/// back into screen coordinates.
+///
+/// Pulled out of [`Model`] as a pure function because this is the arithmetic
+/// that decides whether a detection lands on the crosshair or hundreds of
+/// pixels away, and a `Model` needs an ONNX session to exist.
+fn source_for(crop: bool, roi: Rect, screen: Size, frame_w: i32, frame_h: i32) -> Result<Source> {
+    let (w, h) = (frame_w, frame_h);
+    if w <= 0 || h <= 0 {
+        bail!("[Model] empty frame");
+    }
+    if !crop {
+        return Ok(Source {
+            read: Rect::new(0, 0, w, h),
+            origin: Point::new(0, 0),
+            bound: Size::new(w, h),
+            frame_origin: Point::new(0, 0),
+        });
+    }
+    if roi.width <= 0 || roi.height <= 0 {
+        bail!(
+            "[Model] region must be non-empty, got {}x{}",
+            roi.width,
+            roi.height
+        );
+    }
+    // A frame that is exactly the configured region arrived pre-cropped from
+    // the capture layer, so cropping again would cut a region out of a region.
+    // The read rect covers the frame while origin/bound stay screen-space.
+    if w == roi.width && h == roi.height {
+        return Ok(Source {
+            read: Rect::new(0, 0, w, h),
+            origin: Point::new(roi.x, roi.y),
+            bound: screen,
+            // The frame *is* the region, so it starts where the region does.
+            frame_origin: Point::new(roi.x, roi.y),
+        });
+    }
+    if roi.x < 0 || roi.y < 0 || roi.x + roi.width > w || roi.y + roi.height > h {
+        bail!(
+            "[Model] region {}x{}+{}+{} does not fit inside the {}x{} frame",
+            roi.width,
+            roi.height,
+            roi.x,
+            roi.y,
+            w,
+            h
+        );
+    }
+    Ok(Source {
+        read: roi,
+        origin: Point::new(roi.x, roi.y),
+        bound: Size::new(w, h),
+        // A whole frame spans screen space from its own top-left corner, even
+        // though only `roi` is read out of it.
+        frame_origin: Point::new(0, 0),
+    })
+}
+
 const CXYWH_OFFSET: usize = 4;
 
 pub struct Model {
@@ -30,6 +111,9 @@ pub struct Model {
     iou: f32,
     roi: Rect,
     crop: bool,
+    /// Screen geometry detections are expressed in. Only equal to the frame
+    /// size when the capture layer hands over whole frames.
+    screen: Size,
     /// `v_light_*` model: nearest-neighbour stretch preprocess and a raw
     /// multi-class output instead of the letterboxed two-class path.
     light: bool,
@@ -140,6 +224,7 @@ impl Model {
                 config.region_height as i32,
             ),
             crop,
+            screen: Size::new(config.screen_width as i32, config.screen_height as i32),
             light,
             light_input,
         })
@@ -156,34 +241,21 @@ impl Model {
         }
     }
 
-    /// Region of the frame the model looks at, clamped to the frame.
-    fn source_roi(&self, mat: &Mat) -> Result<Rect> {
-        let (w, h) = (mat.cols(), mat.rows());
-        if w <= 0 || h <= 0 {
-            bail!("[Model] empty frame");
-        }
-        if !self.crop {
-            return Ok(Rect::new(0, 0, w, h));
-        }
-        let roi = self.roi;
-        if roi.x < 0
-            || roi.y < 0
-            || roi.width <= 0
-            || roi.height <= 0
-            || roi.x + roi.width > w
-            || roi.y + roi.height > h
-        {
-            bail!(
-                "[Model] region {}x{}+{}+{} does not fit inside the {}x{} frame",
-                roi.width,
-                roi.height,
-                roi.x,
-                roi.y,
-                w,
-                h
-            );
-        }
-        Ok(roi)
+    /// Region of the frame the model looks at, and where it sits on screen.
+    fn source(&self, mat: &Mat) -> Result<Source> {
+        source_for(self.crop, self.roi, self.screen, mat.cols(), mat.rows())
+    }
+
+    /// Screen-space position of `frame`'s top-left corner.
+    ///
+    /// Detections come out in screen coordinates, so anything that wants to
+    /// draw them onto the frame — or express them relative to it — has to
+    /// subtract this. `(0, 0)` for a whole frame; the region origin only when
+    /// the capture layer pre-cropped the frame down to the region
+    /// (`CAPTURE_ROI`). Shares `source()` with inference so the two cannot
+    /// disagree about where the frame sits.
+    pub fn frame_origin(&self, frame: &Mat) -> Result<Point> {
+        Ok(self.source(frame)?.frame_origin)
     }
 
     /// Nearest-neighbour stretch of the region into an RGB CHW f32 buffer,
@@ -233,7 +305,7 @@ impl Model {
     /// The `v_light_*` models emit five classes (body, head, tm, ability,
     /// flash). Only body and head are targets, and they keep the same 0/1
     /// meaning the two-class models use, so everything downstream is unchanged.
-    fn decode_light(&self, shape: &[i64], values: &[f32], roi: Rect, mat: &Mat) -> Result<Bboxes> {
+    fn decode_light(&self, shape: &[i64], values: &[f32], src: &Source) -> Result<Bboxes> {
         if shape.len() != 3 || shape[0] != 1 || shape[1] < 5 {
             bail!("[Model] expected a [1,C,N] light output, got {:?}", shape);
         }
@@ -248,9 +320,9 @@ impl Model {
             );
         }
 
-        let sx = roi.width as f32 / self.input_size as f32;
-        let sy = roi.height as f32 / self.input_size as f32;
-        let (bound_w, bound_h) = (mat.cols() as f32, mat.rows() as f32);
+        let sx = src.read.width as f32 / self.input_size as f32;
+        let sy = src.read.height as f32 / self.input_size as f32;
+        let (bound_w, bound_h) = (src.bound.width as f32, src.bound.height as f32);
         let mut bboxes = Bboxes::default();
 
         for i in 0..candidates {
@@ -276,8 +348,8 @@ impl Model {
             let cy = values[candidates + i] * sy;
             let w = values[2 * candidates + i] * sx;
             let h = values[3 * candidates + i] * sy;
-            let x = cx - w / 2. + roi.x as f32;
-            let y = cy - h / 2. + roi.y as f32;
+            let x = cx - w / 2. + src.origin.x as f32;
+            let y = cy - h / 2. + src.origin.y as f32;
             let bbox = Bbox::new(x, y, w, h, best, class as u8).bound(bound_w, bound_h);
             bboxes.push(bbox, class);
         }
@@ -295,12 +367,12 @@ impl Model {
                 mat.channels()
             );
         }
-        let roi = self.source_roi(mat)?;
+        let src = self.source(mat)?;
 
         // preprocess
         let pre_time = Instant::now();
         let mut input = self.light_input.borrow_mut();
-        self.preprocess_light(mat, roi, &mut input)?;
+        self.preprocess_light(mat, src.read, &mut input)?;
         let pre_time = pre_time.elapsed();
 
         // inference
@@ -327,7 +399,7 @@ impl Model {
         // postprocess
         let post_time = Instant::now();
         let (shape, values) = outputs[self.output_name.as_str()].try_extract_raw_tensor::<f32>()?;
-        let bboxes = self.decode_light(shape, values, roi, mat)?;
+        let bboxes = self.decode_light(shape, values, &src)?;
         let post_time = post_time.elapsed();
         tracing::debug!(
             "[Model] preprocess took: {:?}, infer took: {:?}, postprocess took: {:?}, total took: {:?}",
@@ -344,13 +416,15 @@ impl Model {
     fn infer_letterbox(&self, mat: &Mat) -> Result<Bboxes> {
         // preprocess
         let pre_time = Instant::now();
+        let src = self.source(mat)?;
         let mut inputs =
             Array::<f32, _>::from_elem((1, 3, self.input_size, self.input_size), 114. / 255.)
                 .into_dyn();
-        let input = if self.crop {
-            std::borrow::Cow::Owned(Mat::roi(mat, self.roi)?.clone_pointee())
-        } else {
+        // A pre-cropped frame is already the region, so `read` covers it all.
+        let input = if src.read.width == mat.cols() && src.read.height == mat.rows() {
             std::borrow::Cow::Borrowed(mat)
+        } else {
+            std::borrow::Cow::Owned(Mat::roi(mat, src.read)?.clone_pointee())
         };
         let (w0, h0) = (input.cols() as f32, input.rows() as f32);
         let (ratio, w_new, h_new) = self.scale_wh(w0, h0);
@@ -405,10 +479,10 @@ impl Model {
             let cy = bbox[1] / ratio;
             let w = bbox[2] / ratio;
             let h = bbox[3] / ratio;
-            let x = cx - w / 2. - dw as f32 / ratio + self.roi.x as f32;
-            let y = cy - h / 2. - dh as f32 / ratio + self.roi.y as f32;
+            let x = cx - w / 2. - dw as f32 / ratio + src.origin.x as f32;
+            let y = cy - h / 2. - dh as f32 / ratio + src.origin.y as f32;
             let bbox = Bbox::new(x, y, w, h, scores[class], class as u8)
-                .bound(mat.cols() as f32, mat.rows() as f32);
+                .bound(src.bound.width as f32, src.bound.height as f32);
             bboxes.push(bbox, class);
         }
         self.non_max_suppression(&mut bboxes.class_0);
@@ -677,5 +751,162 @@ impl Bboxes {
     {
         self.class_0.sort_by(compare.clone());
         self.class_1.sort_by(compare);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SCREEN: Size = Size {
+        width: 1920,
+        height: 1080,
+    };
+    /// The region from the shipped `.env`.
+    const REGION: Rect = Rect {
+        x: 864,
+        y: 444,
+        width: 192,
+        height: 192,
+    };
+
+    /// Screen coordinate a detection at `(mx, my)` in model space lands on.
+    /// Mirrors the arithmetic in `decode_light` so the two stay in step.
+    fn to_screen(src: &Source, input_size: i32, mx: f32, my: f32) -> (f32, f32) {
+        let sx = src.read.width as f32 / input_size as f32;
+        let sy = src.read.height as f32 / input_size as f32;
+        (mx * sx + src.origin.x as f32, my * sy + src.origin.y as f32)
+    }
+
+    #[test]
+    fn a_whole_frame_is_read_through_the_region() {
+        let src = source_for(true, REGION, SCREEN, 1920, 1080).unwrap();
+        assert_eq!(src.read, REGION);
+        assert_eq!(src.origin, Point::new(864, 444));
+        assert_eq!(src.bound, Size::new(1920, 1080));
+    }
+
+    #[test]
+    fn a_pre_cropped_frame_is_read_whole_but_stays_screen_space() {
+        let src = source_for(true, REGION, SCREEN, 192, 192).unwrap();
+        assert_eq!(src.read, Rect::new(0, 0, 192, 192));
+        // The offset has to survive, or every detection lands at the top-left
+        // corner of the screen instead of on the crosshair.
+        assert_eq!(src.origin, Point::new(864, 444));
+        // Bounding to the 192x192 frame would clamp every box to the edge.
+        assert_eq!(src.bound, SCREEN);
+    }
+
+    /// The property the whole `CAPTURE_ROI` change rests on: a detection maps
+    /// to the same screen pixel whether the capture layer cropped or not.
+    #[test]
+    fn both_paths_map_a_detection_to_the_same_screen_pixel() {
+        let whole = source_for(true, REGION, SCREEN, 1920, 1080).unwrap();
+        let cropped = source_for(true, REGION, SCREEN, 192, 192).unwrap();
+        for &(mx, my) in &[(0., 0.), (96., 96.), (191., 191.), (48.5, 137.25)] {
+            assert_eq!(
+                to_screen(&whole, 192, mx, my),
+                to_screen(&cropped, 192, mx, my),
+                "model-space ({mx}, {my}) diverges"
+            );
+        }
+        // Centre of the region is the centre of the screen for this config.
+        assert_eq!(to_screen(&cropped, 192, 96., 96.), (960., 540.));
+    }
+
+    #[test]
+    fn a_region_of_a_different_size_still_scales_per_axis() {
+        // A 256-wide region into a 192 input stretches by 4/3 on that axis.
+        let roi = Rect::new(800, 400, 256, 192);
+        let src = source_for(true, roi, SCREEN, 256, 192).unwrap();
+        assert_eq!(to_screen(&src, 192, 0., 0.), (800., 400.));
+        assert_eq!(to_screen(&src, 192, 192., 192.), (800. + 256., 400. + 192.));
+    }
+
+    /// `frame_origin` is what the debug overlay subtracts, and it is NOT
+    /// `origin`: `origin` locates the region, `frame_origin` locates the frame.
+    /// They only coincide when the capture layer pre-cropped. Getting this
+    /// wrong draws every box shifted by the region offset.
+    #[test]
+    fn frame_origin_locates_the_frame_not_the_region() {
+        // Whole frame: the frame starts at the screen's corner even though only
+        // the region is read out of it.
+        let whole = source_for(true, REGION, SCREEN, 1920, 1080).unwrap();
+        assert_eq!(whole.origin, Point::new(864, 444));
+        assert_eq!(whole.frame_origin, Point::new(0, 0));
+
+        // Pre-cropped: the frame *is* the region.
+        let cropped = source_for(true, REGION, SCREEN, 192, 192).unwrap();
+        assert_eq!(cropped.origin, Point::new(864, 444));
+        assert_eq!(cropped.frame_origin, Point::new(864, 444));
+
+        // No crop at all.
+        let plain = source_for(false, REGION, SCREEN, 1920, 1080).unwrap();
+        assert_eq!(plain.frame_origin, Point::new(0, 0));
+    }
+
+    /// A detection at the centre of the region must land inside whichever frame
+    /// it is drawn onto, in both capture modes.
+    #[test]
+    fn a_screen_detection_draws_inside_the_frame_in_both_modes() {
+        for (fw, fh) in [(1920, 1080), (192, 192)] {
+            let src = source_for(true, REGION, SCREEN, fw, fh).unwrap();
+            let (sx, sy) = to_screen(&src, 192, 96., 96.);
+            // Same screen pixel regardless of mode.
+            assert_eq!((sx, sy), (960., 540.), "frame {fw}x{fh}");
+
+            // Exactly what main.rs computes for the overlay.
+            let dx = sx - src.frame_origin.x as f32;
+            let dy = sy - src.frame_origin.y as f32;
+            assert!(
+                (0. ..fw as f32).contains(&dx) && (0. ..fh as f32).contains(&dy),
+                "frame {fw}x{fh}: draw point ({dx}, {dy}) falls outside the frame"
+            );
+            let expected = if fw == 192 { (96., 96.) } else { (960., 540.) };
+            assert_eq!((dx, dy), expected, "frame {fw}x{fh}");
+        }
+    }
+
+    /// The region need not be centred; the overlay shift must still be exact.
+    #[test]
+    fn an_off_centre_region_shifts_exactly() {
+        let roi = Rect::new(1184, 624, 192, 192);
+        let screen = Size::new(2560, 1440);
+        // Whole 2560x1440 frame: no shift, box drawn at its screen position.
+        let whole = source_for(true, roi, screen, 2560, 1440).unwrap();
+        assert_eq!(whole.frame_origin, Point::new(0, 0));
+        assert_eq!(to_screen(&whole, 192, 96., 96.), (1280., 720.));
+
+        // Pre-cropped: shift by the region origin puts it at the frame centre.
+        let cropped = source_for(true, roi, screen, 192, 192).unwrap();
+        assert_eq!(cropped.frame_origin, Point::new(1184, 624));
+        let (sx, sy) = to_screen(&cropped, 192, 96., 96.);
+        assert_eq!(
+            (sx - 1184., sy - 624.),
+            (96., 96.),
+            "off-centre region does not shift onto the frame centre"
+        );
+    }
+
+    #[test]
+    fn no_crop_reads_and_bounds_the_frame_itself() {
+        let src = source_for(false, REGION, SCREEN, 1280, 720).unwrap();
+        assert_eq!(src.read, Rect::new(0, 0, 1280, 720));
+        assert_eq!(src.origin, Point::new(0, 0));
+        assert_eq!(src.bound, Size::new(1280, 720));
+    }
+
+    #[test]
+    fn a_region_outside_a_whole_frame_is_rejected() {
+        // A region placed for 1080p, against a 720p frame: it runs off both
+        // edges, which is the failure the whole-frame path has to catch.
+        // 1600+192 = 1792 and 800+192 = 992: inside 1080p, off the edge at 720p.
+        let low = Rect::new(1600, 800, 192, 192);
+        assert!(source_for(true, low, SCREEN, 1280, 720).is_err());
+        // ...and the same region is fine once the frame is big enough.
+        assert!(source_for(true, low, SCREEN, 1920, 1080).is_ok());
+        assert!(source_for(true, Rect::new(-1, 0, 192, 192), SCREEN, 1920, 1080).is_err());
+        assert!(source_for(true, Rect::new(0, 0, 0, 192), SCREEN, 1920, 1080).is_err());
+        assert!(source_for(true, REGION, SCREEN, 0, 0).is_err());
     }
 }

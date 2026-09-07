@@ -272,14 +272,20 @@ fn main() -> Result<()> {
                                 #[cfg(not(feature = "save-bbox"))]
                                 let mut image = image;
 
+                                // Detections are screen-space; the frame may be
+                                // only the region (CAPTURE_ROI), so shift them
+                                // into frame-local coordinates before drawing.
+                                #[cfg(not(feature = "save-bbox"))]
+                                let draw_origin = model.frame_origin(&image)?;
+
                                 #[cfg(not(feature = "save-bbox"))]
                                 {
                                     bboxes.class_0.iter().for_each(|b| {
                                         opencv::imgproc::rectangle(
                                             &mut image,
                                             opencv::core::Rect::new(
-                                                b.xmin() as i32,
-                                                b.ymin() as i32,
+                                                b.xmin() as i32 - draw_origin.x,
+                                                b.ymin() as i32 - draw_origin.y,
                                                 b.width() as i32,
                                                 b.height() as i32,
                                             ),
@@ -294,8 +300,8 @@ fn main() -> Result<()> {
                                         opencv::imgproc::rectangle(
                                             &mut image,
                                             opencv::core::Rect::new(
-                                                b.xmin() as i32,
-                                                b.ymin() as i32,
+                                                b.xmin() as i32 - draw_origin.x,
+                                                b.ymin() as i32 - draw_origin.y,
                                                 b.width() as i32,
                                                 b.height() as i32,
                                             ),
@@ -309,8 +315,8 @@ fn main() -> Result<()> {
                                     opencv::imgproc::circle(
                                         &mut image,
                                         opencv::core::Point::new(
-                                            destination.x() as i32,
-                                            destination.y() as i32,
+                                            destination.x() as i32 - draw_origin.x,
+                                            destination.y() as i32 - draw_origin.y,
                                         ),
                                         3,
                                         opencv::core::Scalar::new(255., 0., 0., 0.),
@@ -330,16 +336,21 @@ fn main() -> Result<()> {
                                     let mut txt = std::fs::File::create(format!(
                                         "{ROOT_PATH_DEBUG}/{filename_txt}"
                                     ))?;
+                                    // Labels have to be normalised against the
+                                    // image that is actually written next to
+                                    // them, which is the region under
+                                    // CAPTURE_ROI and the whole frame otherwise.
+                                    let origin = model.frame_origin(&image)?;
+                                    let (img_w, img_h) = (image.cols() as f32, image.rows() as f32);
                                     let mut f = |bboxes: &Vec<Bbox>, class: u32| {
                                         bboxes.iter().for_each(|bbox| {
                                             let center = bbox.cxcy();
                                             let (x, y) = (
-                                                center.x() / config.screen_width as f32,
-                                                center.y() / config.screen_height as f32,
+                                                (center.x() - origin.x as f32) / img_w,
+                                                (center.y() - origin.y as f32) / img_h,
                                             );
-                                            let width = bbox.width() / config.screen_width as f32;
-                                            let height =
-                                                bbox.height() / config.screen_height as f32;
+                                            let width = bbox.width() / img_w;
+                                            let height = bbox.height() / img_h;
                                             txt.write_all(
                                                 format!("{class} {x} {y} {width} {height}\r\n")
                                                     .as_bytes(),

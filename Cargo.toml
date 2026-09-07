@@ -45,3 +45,6 @@ name = "mouse_test"
 [[bin]]
 path = "src/bin/button_test.rs"
 name = "button_test"
+
+[build-dependencies]
+cc = "1.2"

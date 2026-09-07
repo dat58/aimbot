@@ -236,6 +236,7 @@ dependencies = [
  "dotenv",
  "grafton-ndi",
  "lazy_static",
+ "libc",
  "mimalloc",
  "ndarray",
  "ndi",

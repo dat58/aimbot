@@ -1,8 +1,8 @@
 use crate::config::{Config, SCALE_HEAD_X, SCALE_HEAD_Y};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use ndarray::{Array, Axis, Ix2, s};
 use opencv::{
-    core::{Mat, MatTraitConst, Rect, Size, VecN},
+    core::{Mat, MatTraitConst, MatTraitConstManual, Rect, Size, VecN},
     imgproc::{InterpolationFlags, resize},
 };
 use ort::{
@@ -10,8 +10,12 @@ use ort::{
         CPUExecutionProvider, MIGraphXExecutionProvider, OpenVINOExecutionProvider,
         ROCmExecutionProvider, TensorRTExecutionProvider,
     },
-    session::{Session, builder::GraphOptimizationLevel},
+    memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType},
+    session::{Session, SessionInputValue, builder::GraphOptimizationLevel},
+    value::TensorRefMut,
 };
+use std::borrow::Cow;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::time::Instant;
 
@@ -26,6 +30,12 @@ pub struct Model {
     iou: f32,
     roi: Rect,
     crop: bool,
+    /// `v_light_*` model: nearest-neighbour stretch preprocess and a raw
+    /// multi-class output instead of the letterboxed two-class path.
+    light: bool,
+    /// Persistent NCHW input buffer for the light path. ONNX Runtime borrows it
+    /// in place, so steady-state inference neither allocates nor copies it.
+    light_input: RefCell<Vec<f32>>,
 }
 
 impl Model {
@@ -104,6 +114,18 @@ impl Model {
             .unwrap();
         let crop = config.screen_width != config.region_width
             || config.screen_height != config.region_height;
+        let light = config.light_model;
+        tracing::info!(
+            "[Model] {} pipeline: {}x{} input",
+            if light { "v_light" } else { "letterbox" },
+            config.model_input_size,
+            config.model_input_size
+        );
+        let light_input = RefCell::new(if light {
+            vec![0.0f32; 3 * config.model_input_size * config.model_input_size]
+        } else {
+            Vec::new()
+        });
         Ok(Self {
             session,
             input_name,
@@ -118,6 +140,8 @@ impl Model {
                 config.region_height as i32,
             ),
             crop,
+            light,
+            light_input,
         })
     }
 }
@@ -125,6 +149,199 @@ impl Model {
 impl Model {
     #[inline]
     pub fn infer(&self, mat: &Mat) -> Result<Bboxes> {
+        if self.light {
+            self.infer_light(mat)
+        } else {
+            self.infer_letterbox(mat)
+        }
+    }
+
+    /// Region of the frame the model looks at, clamped to the frame.
+    fn source_roi(&self, mat: &Mat) -> Result<Rect> {
+        let (w, h) = (mat.cols(), mat.rows());
+        if w <= 0 || h <= 0 {
+            bail!("[Model] empty frame");
+        }
+        if !self.crop {
+            return Ok(Rect::new(0, 0, w, h));
+        }
+        let roi = self.roi;
+        if roi.x < 0
+            || roi.y < 0
+            || roi.width <= 0
+            || roi.height <= 0
+            || roi.x + roi.width > w
+            || roi.y + roi.height > h
+        {
+            bail!(
+                "[Model] region {}x{}+{}+{} does not fit inside the {}x{} frame",
+                roi.width,
+                roi.height,
+                roi.x,
+                roi.y,
+                w,
+                h
+            );
+        }
+        Ok(roi)
+    }
+
+    /// Nearest-neighbour stretch of the region into an RGB CHW f32 buffer,
+    /// normalized by 1/255. No letterbox and no padding, matching capfkaplus:
+    /// each axis gets its own scale and the decoder undoes it with the inverse
+    /// per-axis factor. The whole model input carries image, none of it
+    /// padding, at the cost of distorting a non-square region.
+    fn preprocess_light(&self, mat: &Mat, roi: Rect, out: &mut [f32]) -> Result<()> {
+        const INV_255: f64 = 1.0 / 255.0;
+        let size = self.input_size;
+
+        // A continuous frame is read straight through, region included; a
+        // non-continuous one needs one crop copy.
+        let cropped;
+        let (data, stride, base) = if mat.is_continuous() {
+            let stride = mat.cols() as usize * 3;
+            let base = roi.y as usize * stride + roi.x as usize * 3;
+            (mat.data_bytes()?, stride, base)
+        } else {
+            cropped = Mat::roi(mat, roi)?.clone_pointee();
+            (cropped.data_bytes()?, roi.width as usize * 3, 0usize)
+        };
+
+        let (rw, rh) = (roi.width as usize, roi.height as usize);
+        let sx = rw as f64 / size as f64;
+        let sy = rh as f64 / size as f64;
+        let plane = size * size;
+
+        for y in 0..size {
+            let row = base + ((y as f64 * sy) as usize).min(rh - 1) * stride;
+            for x in 0..size {
+                let p = row + ((x as f64 * sx) as usize).min(rw - 1) * 3;
+                let idx = y * size + x;
+                // BGR source, RGB output.
+                out[idx] = (data[p + 2] as f64 * INV_255) as f32;
+                out[plane + idx] = (data[p + 1] as f64 * INV_255) as f32;
+                out[2 * plane + idx] = (data[p] as f64 * INV_255) as f32;
+            }
+        }
+        Ok(())
+    }
+
+    /// Decode the raw `[1, 4 + classes, N]` light output. Channels are
+    /// `cx, cy, w, h` in model-input pixels followed by one score per class —
+    /// no objectness channel and no NMS inside the graph.
+    ///
+    /// The `v_light_*` models emit five classes (body, head, tm, ability,
+    /// flash). Only body and head are targets, and they keep the same 0/1
+    /// meaning the two-class models use, so everything downstream is unchanged.
+    fn decode_light(&self, shape: &[i64], values: &[f32], roi: Rect, mat: &Mat) -> Result<Bboxes> {
+        if shape.len() != 3 || shape[0] != 1 || shape[1] < 5 {
+            bail!("[Model] expected a [1,C,N] light output, got {:?}", shape);
+        }
+        let channels = shape[1] as usize;
+        let candidates = shape[2] as usize;
+        if values.len() < channels * candidates {
+            bail!(
+                "[Model] light output truncated: {} values for {}x{}",
+                values.len(),
+                channels,
+                candidates
+            );
+        }
+
+        let sx = roi.width as f32 / self.input_size as f32;
+        let sy = roi.height as f32 / self.input_size as f32;
+        let (bound_w, bound_h) = (mat.cols() as f32, mat.rows() as f32);
+        let mut bboxes = Bboxes::default();
+
+        for i in 0..candidates {
+            // Argmax over every class, not just the first two: that way a
+            // teammate or ability box wins its own candidate and is skipped,
+            // instead of being read as a body at whatever score it happens to
+            // have on channel 4.
+            let mut best = f32::NEG_INFINITY;
+            let mut class = 0usize;
+            for c in CXYWH_OFFSET..channels {
+                let score = values[c * candidates + i];
+                if score > best {
+                    best = score;
+                    class = c - CXYWH_OFFSET;
+                }
+            }
+            if class > 1 || best < self.conf[class] {
+                continue;
+            }
+
+            // bbox re-scale: inverse of the per-axis stretch
+            let cx = values[i] * sx;
+            let cy = values[candidates + i] * sy;
+            let w = values[2 * candidates + i] * sx;
+            let h = values[3 * candidates + i] * sy;
+            let x = cx - w / 2. + roi.x as f32;
+            let y = cy - h / 2. + roi.y as f32;
+            let bbox = Bbox::new(x, y, w, h, best, class as u8).bound(bound_w, bound_h);
+            bboxes.push(bbox, class);
+        }
+
+        self.non_max_suppression(&mut bboxes.class_0);
+        self.non_max_suppression(&mut bboxes.class_1);
+        Ok(bboxes)
+    }
+
+    #[inline]
+    fn infer_light(&self, mat: &Mat) -> Result<Bboxes> {
+        if mat.channels() != 3 {
+            bail!(
+                "[Model] expected a 3-channel BGR frame, got {} channels",
+                mat.channels()
+            );
+        }
+        let roi = self.source_roi(mat)?;
+
+        // preprocess
+        let pre_time = Instant::now();
+        let mut input = self.light_input.borrow_mut();
+        self.preprocess_light(mat, roi, &mut input)?;
+        let pre_time = pre_time.elapsed();
+
+        // inference
+        let infer_time = Instant::now();
+        let mem = MemoryInfo::new(
+            AllocationDevice::CPU,
+            0,
+            AllocatorType::Arena,
+            MemoryType::CPUInput,
+        )?;
+        // Borrows the persistent buffer rather than handing ORT a fresh copy.
+        let tensor = unsafe {
+            TensorRefMut::<f32>::from_raw(
+                mem,
+                input.as_mut_ptr().cast(),
+                vec![1, 3, self.input_size as i64, self.input_size as i64],
+            )
+        }?;
+        let inputs: Vec<(Cow<'_, str>, SessionInputValue<'_>)> =
+            vec![(Cow::Borrowed(self.input_name.as_str()), tensor.into())];
+        let outputs = self.session.run(inputs)?;
+        let infer_time = infer_time.elapsed();
+
+        // postprocess
+        let post_time = Instant::now();
+        let (shape, values) = outputs[self.output_name.as_str()].try_extract_raw_tensor::<f32>()?;
+        let bboxes = self.decode_light(shape, values, roi, mat)?;
+        let post_time = post_time.elapsed();
+        tracing::debug!(
+            "[Model] preprocess took: {:?}, infer took: {:?}, postprocess took: {:?}, total took: {:?}",
+            pre_time,
+            infer_time,
+            post_time,
+            pre_time + infer_time + post_time,
+        );
+
+        Ok(bboxes)
+    }
+
+    #[inline]
+    fn infer_letterbox(&self, mat: &Mat) -> Result<Bboxes> {
         // preprocess
         let pre_time = Instant::now();
         let mut inputs =

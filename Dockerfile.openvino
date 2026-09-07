@@ -1,0 +1,50 @@
+FROM vtdat58/rust:1.86.0-cuda11.8.0-cudnn8-tensorrt8.6.1.6-onnxruntime1.21.1-opencv4.8.0-videoio-ndi-dylib AS chef
+WORKDIR /app
+
+FROM python:3.12-slim-bookworm AS ort-openvino
+ARG ORT_OPENVINO_VERSION=1.23.0
+RUN pip download --no-deps --only-binary=:all: \
+        --platform manylinux_2_28_x86_64 --python-version 312 \
+        "onnxruntime-openvino==${ORT_OPENVINO_VERSION}" -d /whl \
+ && python -m zipfile -e /whl/*.whl /extract \
+ && mkdir -p /release/ort \
+ && cp -L /extract/onnxruntime/capi/libonnxruntime.so.* /release/ort/ \
+ && cp -L /extract/onnxruntime/capi/libonnxruntime_providers_*.so /release/ort/ \
+ && cp -L /extract/onnxruntime/capi/libopenvino*.so* /release/ort/ \
+ && cp -L /extract/onnxruntime/capi/libtbb*.so* /release/ort/ \
+ && ln -sf "libonnxruntime.so.${ORT_OPENVINO_VERSION}" /release/ort/libonnxruntime.so \
+ && ls -la /release/ort
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN cargo build --release --locked
+
+FROM chef AS runtime-libs
+COPY --from=builder /app/target/release/aimbot /aimbot
+RUN mkdir -p /release/lib \
+ && ldd /aimbot | awk '/=> \//{print $3}' | sort -u \
+      | grep -vE '/(ld-linux-x86-64|libc|libm|libdl|librt|libpthread|libresolv)\.so' \
+      | xargs -r -I{} cp -Lv {} /release/lib/ \
+ && echo "harvested $(ls /release/lib | wc -l) libraries"
+
+FROM ubuntu:22.04
+WORKDIR /app
+ENV TZ=Asia/Ho_Chi_Minh \
+    SSL_CERT_DIR=/etc/ssl/certs \
+    ORT_DYLIB_PATH=/app/ort/libonnxruntime.so \
+    PATH=$PATH:/app
+COPY --from=runtime-libs /release/lib/ /usr/local/lib/aimbot/
+RUN echo /usr/local/lib/aimbot > /etc/ld.so.conf.d/aimbot.conf && ldconfig
+COPY --from=ort-openvino /release/ort/ /app/ort/
+COPY --from=chef /etc/ssl/certs /etc/ssl/certs
+COPY --from=builder /app/target/release/aimbot .
+COPY --from=builder /app/target/release/button_test .
+COPY --from=builder /app/target/release/mouse_test .
+RUN ldd ./aimbot | grep -F 'not found' && exit 1 || echo "all dependencies resolved"
+ENTRYPOINT ["./aimbot"]

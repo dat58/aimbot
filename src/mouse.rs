@@ -137,8 +137,8 @@ impl MouseVirtual {
         let lower = (pixel * 0.2) as i32;
         let upper = (pixel * 0.55) as i32 + 1;
         let steps = random.random_range(lower..=upper);
-        let ref_x = random.random_range(4..17);
-        let ref_y = random.random_range(4..17);
+        let ref_x = random.random_range(2..9);
+        let ref_y = random.random_range(2..9);
         (steps, ref_x, ref_y)
     }
 
@@ -299,7 +299,7 @@ impl MouseVirtual {
         self.cmd(format!("km.right(1){CRLF}km.right(0)").as_str())
     }
 
-    pub fn batch(&self) -> BatchCommands {
+    pub fn batch(&self) -> BatchCommands<'_> {
         BatchCommands::new(self)
     }
 }

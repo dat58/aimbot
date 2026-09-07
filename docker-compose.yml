@@ -1,41 +1,62 @@
-version: '3.7'
 services:
   aimbot:
-    image: aimbot:1.0.0
+    image: aimbot:1.0.0-openvino
     container_name: aimbot
     network_mode: host
     devices:
+      # MAKCU_PORT
       - "/dev/ttyACM0:/dev/ttyACM0"
+      # CAPTURE_DEVICE — only needed for SOURCE_STREAM=elgato://
+      # - "/dev/video0:/dev/video0"
+      # only needed for OPENVINO_DEVICE_TYPE=GPU
+      # - "/dev/dri:/dev/dri"
     volumes:
       - ./assets:/app/assets
-      - ./assets/best.onnx:/app/assets/best.onnx
     environment:
       - RUST_LOG=info,aimbot=info
       - EVENT_LISTENER_PORT=10000
+
+      # Frame source. Swap for `elgato://` to read the capture card directly,
+      # and pass /dev/video0 through above.
       - SOURCE_STREAM=ndi://172.24.36.133
       - NDI_SOURCE_NAME=pc1
       - NDI_TIMEOUT=1000
+      # - SOURCE_STREAM=elgato://
+      # - CAPTURE_DEVICE=/dev/video0
+      # - CAPTURE_WIDTH=1920
+      # - CAPTURE_HEIGHT=1080
+      # - CAPTURE_FPS=60
+
       - SCREEN_WIDTH=1920
       - SCREEN_HEIGHT=1080
       - REGION_LEFT=832
       - REGION_TOP=412
       - REGION_WIDTH=256
       - REGION_HEIGHT=256
-      - SCALE_MIN_ZONE=0.85
-      - MODEL_PROVIDER=CPU
+      - SCALE_MIN_ZONE1=0.85
+      - SCALE_MIN_ZONE2=0.85
+
+      # Model. MODEL_PATH also selects the pipeline: a `v_light_*` file name
+      # switches to the ported nearest-neighbour preprocess and 9-channel
+      # decoder, anything else keeps the letterboxed two-class path.
+      - MODEL_PROVIDER=openvino
       - MODEL_PATH=/app/assets/best.onnx
-      - TRT_CACHE_DIR=/app/assets
       - MODEL_INPUT_SIZE=256
-      - MODEL_CONF=0.7
+      - MODEL_CONF_BODY=0.7
+      - MODEL_CONF_HEAD=0.7
       - MODEL_IOU=0.6
+      - INTRA_THREADS=1
+
+      - OPENVINO_CACHE_DIR=/app/assets
+      - OPENVINO_DEVICE_TYPE=CPU
+
+      # Read unconditionally by Config::new(), even on an OpenVINO build.
+      - TRT_CACHE_DIR=/app/assets
       - TRT_MIN_SHAPES=images:1x3x256x256
       - TRT_OPT_SHAPES=images:1x3x256x256
       - TRT_MAX_SHAPES=images:1x3x256x256
-      - TRT_FP16=true
-      - TRT_MAX_PARTITION_ITERATIONS=10
-      - TRT_BUILDER_OPTIMIZATION_LEVEL=5
+
       - MAKCU_PORT=/dev/ttyACM0
       - MAKCU_BAUD=4000000
-      - MAKCU_MOUSE_LOCK_WHILE_AIM=false
       - MOUSE_DPI=1000
       - GAME_SENS=1.0

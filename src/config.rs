@@ -1,4 +1,6 @@
-use std::{env::var, path::PathBuf};
+use crate::stream::elgato::OutputFormat;
+use crate::stream::v4l2::parse_fourcc;
+use std::{env::var, path::PathBuf, time::Duration};
 
 pub const SCALE_HEAD_Y: f32 = 1. / 6.;
 pub const SCALE_HEAD_X: f32 = 0.6;
@@ -22,6 +24,8 @@ pub struct Config {
     pub region_height: u32,
     pub scale_min_zone1: f32,
     pub scale_min_zone2: f32,
+    /// condition to trigger, if fov <= L2 distance -> allow trigger
+    pub fov: f32,
 
     pub model_provider: String,
     pub model_path: PathBuf,
@@ -30,6 +34,20 @@ pub struct Config {
     pub model_conf_head: f32,
     pub model_iou: f32,
     pub build_head_iou: Option<f32>,
+
+    /// True for the `v_light_*` models, which need the nearest-neighbour
+    /// stretch preprocess and the raw multi-class output decoder.
+    pub light_model: bool,
+
+    pub capture_device: String,
+    pub capture_width: u32,
+    pub capture_height: u32,
+    pub capture_fps: u32,
+    pub capture_fourcc: Option<u32>,
+    pub capture_buffers: u32,
+    pub capture_drop_stale: bool,
+    pub capture_timeout: Duration,
+    pub capture_output: OutputFormat,
 
     pub gpu_id: Option<i32>,
     pub gpu_mem_limit: Option<usize>,
@@ -55,6 +73,7 @@ pub struct Config {
     pub game_sens: f64,
 
     pub esp_port: Option<String>,
+    pub default_aim_mode: Option<u8>,
 }
 
 impl Config {
@@ -127,6 +146,47 @@ impl Config {
         let build_head_iou = var("BUILD_HEAD_IOU")
             .ok()
             .map(|o| o.parse::<f32>().expect("BUILD_HEAD_IOU is not a number"));
+
+        // The `v_light_*` models need a different preprocess and output decoder;
+        // the file name is what selects it.
+        let light_model = model_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.to_ascii_lowercase().starts_with("v_light"));
+
+        let capture_device = var("CAPTURE_DEVICE").unwrap_or("/dev/video0".to_string());
+        let capture_width = var("CAPTURE_WIDTH")
+            .unwrap_or("1920".to_string())
+            .parse::<u32>()
+            .expect("CAPTURE_WIDTH is not a number");
+        let capture_height = var("CAPTURE_HEIGHT")
+            .unwrap_or("1080".to_string())
+            .parse::<u32>()
+            .expect("CAPTURE_HEIGHT is not a number");
+        let capture_fps = var("CAPTURE_FPS")
+            .unwrap_or("60".to_string())
+            .parse::<u32>()
+            .expect("CAPTURE_FPS is not a number");
+        let capture_fourcc = var("CAPTURE_FOURCC")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| parse_fourcc(&v).expect("CAPTURE_FOURCC is not a valid fourcc"));
+        let capture_buffers = var("CAPTURE_BUFFERS")
+            .unwrap_or("3".to_string())
+            .parse::<u32>()
+            .expect("CAPTURE_BUFFERS is not a number");
+        let capture_drop_stale = var("CAPTURE_DROP_STALE")
+            .unwrap_or("true".to_string())
+            .parse::<bool>()
+            .expect("CAPTURE_DROP_STALE is not a bool");
+        let capture_timeout = Duration::from_millis(
+            var("CAPTURE_TIMEOUT_MS")
+                .unwrap_or("1000".to_string())
+                .parse::<u64>()
+                .expect("CAPTURE_TIMEOUT_MS is not a valid integer"),
+        );
+        let capture_output = OutputFormat::parse(&var("CAPTURE_OUTPUT").unwrap_or_default())
+            .expect("CAPTURE_OUTPUT is not valid");
         let gpu_id = var("GPU_ID").ok().and_then(|s| s.parse::<i32>().ok());
         let gpu_mem_limit = var("GPU_MEM_LIMIT")
             .ok()
@@ -174,6 +234,13 @@ impl Config {
             .parse::<f64>()
             .expect("GAME_SENS is not a number");
         let esp_port = var("ESP_PORT").ok();
+        let fov = var("FOV")
+            .unwrap_or((screen_width as f32).to_string())
+            .parse()
+            .unwrap();
+        let default_aim_mode = var("DEFAULT_AIM_MODE")
+            .ok()
+            .and_then(|v| Some(v.parse::<u8>().expect("DEFAULT_AIM_MODE is not a u8")));
         Self {
             event_listener_port,
             source_stream,
@@ -194,6 +261,16 @@ impl Config {
             model_conf_head,
             model_iou,
             build_head_iou,
+            light_model,
+            capture_device,
+            capture_width,
+            capture_height,
+            capture_fps,
+            capture_fourcc,
+            capture_buffers,
+            capture_drop_stale,
+            capture_timeout,
+            capture_output,
             gpu_id,
             gpu_mem_limit,
             trt_min_shapes,
@@ -215,6 +292,8 @@ impl Config {
             mouse_dpi,
             game_sens,
             esp_port,
+            fov,
+            default_aim_mode,
         }
     }
 }

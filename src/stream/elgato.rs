@@ -23,7 +23,7 @@
 //! layout.
 
 use crate::config::Config;
-use crate::stream::v4l2::{self, Capture, Format, fourcc_to_string};
+use crate::stream::v4l2::{self, Capture, Format, fourcc_to_string, monotonic_now};
 use crate::stream::{StreamCapture, StreamInfo};
 use anyhow::{Result, anyhow, bail};
 use opencv::core::{CV_8U, CV_MAKETYPE, Mat, MatTraitConst};
@@ -220,7 +220,14 @@ impl StreamCapture for Elgato {
         let layout = self.layout;
         let started = Instant::now();
 
-        let mat = self.cap.with_frame(|bytes, meta| {
+        let mut waited_for = std::time::Duration::ZERO;
+        let mut frame_age = None;
+        let mat = self.cap.with_frame(|bytes, meta, waited| {
+            waited_for = waited;
+            if meta.timestamp_monotonic {
+                frame_age = monotonic_now().checked_sub(meta.timestamp);
+            }
+            let convert = Instant::now();
             if bytes.is_empty() {
                 bail!("[Elgato] driver returned an empty frame");
             }
@@ -239,7 +246,7 @@ impl StreamCapture for Elgato {
                 if output == OutputFormat::Raw {
                     let mut dst = Mat::default();
                     src.copy_to(&mut dst)?;
-                    return Ok(dst);
+                    return Ok((dst, convert.elapsed()));
                 }
                 let dst = opencv::imgcodecs::imdecode(
                     &src,
@@ -248,7 +255,7 @@ impl StreamCapture for Elgato {
                 if dst.empty() {
                     bail!("[Elgato] MJPEG frame {} failed to decode", meta.sequence);
                 }
-                return Ok(dst);
+                return Ok((dst, convert.elapsed()));
             }
 
             let needed = layout.step * layout.rows as usize;
@@ -283,12 +290,20 @@ impl StreamCapture for Elgato {
                     opencv::imgproc::cvt_color_def(&src, &mut dst, code)?
                 }
             }
-            Ok(dst)
+            Ok((dst, convert.elapsed()))
         })?;
+        let (mat, convert_for) = mat;
 
+        // `waited` is time spent blocked on the sensor, which is bounded below
+        // by the frame interval and is not work we can optimise away; `convert`
+        // is. `age` is what actually matters: how stale the frame already was
+        // when the driver handed it over.
         tracing::debug!(
-            "[Elgato] frame ready in {:?} ({}x{})",
+            "[Elgato] total {:?} = wait {:?} + convert {:?} | frame age {} | {}x{}",
             started.elapsed(),
+            waited_for,
+            convert_for,
+            frame_age.map_or_else(|| "n/a".to_string(), |a| format!("{a:?}")),
             mat.cols(),
             mat.rows()
         );

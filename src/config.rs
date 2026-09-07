@@ -9,6 +9,56 @@ pub const SCALE_CHEST_Y: f32 = 3.0 / 6.;
 pub const SCALE_ABDOMEN_Y: f32 = 5.0 / 6.;
 pub const WIN_DPI_SCALE_FACTOR: f64 = 96.;
 
+/// Geometry of the frames the pipeline actually receives, plus the per-axis
+/// factor that turns a frame pixel into a screen pixel.
+///
+/// `REGION_*` and every detection are expressed in *frame* pixels — `REGION_*`
+/// indexes the incoming frame directly. The game, however, renders at
+/// `SCREEN_*`, so a mouse delta has to be converted before it means anything.
+/// The two spaces coincide only when the capture matches the screen.
+///
+/// `CAPTURE_*` describes the frame only for a V4L2 source; NDI and UDP ignore
+/// it entirely, so those are pinned at 1:1 with the screen rather than scaled
+/// by a number that means nothing for them.
+pub fn frame_geometry(
+    source_stream: &str,
+    screen: (u32, u32),
+    capture: (u32, u32),
+) -> ((u32, u32), (f64, f64)) {
+    let source = source_stream.trim();
+    let v4l2 = source.starts_with("elgato://") || source.starts_with("v4l2://");
+    let frame = if v4l2 && capture.0 > 0 && capture.1 > 0 {
+        capture
+    } else {
+        screen
+    };
+    let scale = (
+        screen.0 as f64 / frame.0 as f64,
+        screen.1 as f64 / frame.1 as f64,
+    );
+    (frame, scale)
+}
+
+/// Mouse counts for a target `frame_delta` pixels from the crosshair.
+///
+/// The delta arrives in frame pixels and is scaled to screen pixels first,
+/// because `MOUSE_DPI`/`GAME_SENS` are calibrated against what the game draws,
+/// not against whatever resolution the capture card happens to deliver.
+pub fn mouse_counts(
+    frame_delta: (f32, f32),
+    frame_to_screen: (f64, f64),
+    game_sens: f64,
+    mouse_dpi: f64,
+) -> (f64, f64) {
+    let counts = |d: f32, scale: f64| -> f64 {
+        d as f64 * scale * WIN_DPI_SCALE_FACTOR / game_sens / mouse_dpi
+    };
+    (
+        counts(frame_delta.0, frame_to_screen.0),
+        counts(frame_delta.1, frame_to_screen.1),
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub event_listener_port: u16,
@@ -18,6 +68,13 @@ pub struct Config {
     pub ndi_timeout: std::time::Duration,
     pub screen_width: u32,
     pub screen_height: u32,
+    /// Geometry of the frames that actually arrive, which is what `REGION_*`
+    /// and every detection are measured in. See [`frame_geometry`].
+    pub frame_width: u32,
+    pub frame_height: u32,
+    /// Frame pixel -> screen pixel, per axis. `(1.0, 1.0)` when the capture
+    /// already matches the screen.
+    pub frame_to_screen: (f64, f64),
     pub region_top: u32,
     pub region_left: u32,
     pub region_width: u32,
@@ -192,6 +249,24 @@ impl Config {
         );
         let capture_output = OutputFormat::parse(&var("CAPTURE_OUTPUT").unwrap_or_default())
             .expect("CAPTURE_OUTPUT is not valid");
+        let ((frame_width, frame_height), frame_to_screen) = frame_geometry(
+            &source_stream,
+            (screen_width, screen_height),
+            (capture_width, capture_height),
+        );
+        if (frame_width, frame_height) != (screen_width, screen_height) {
+            tracing::info!(
+                "[Config] frames arrive at {}x{} while the game renders at {}x{}; \
+                 REGION_* and detections are in frame pixels and mouse deltas are \
+                 scaled by {:.4}x/{:.4}y",
+                frame_width,
+                frame_height,
+                screen_width,
+                screen_height,
+                frame_to_screen.0,
+                frame_to_screen.1,
+            );
+        }
         let capture_roi = var("CAPTURE_ROI")
             .unwrap_or("true".to_string())
             .parse::<bool>()
@@ -243,8 +318,10 @@ impl Config {
             .parse::<f64>()
             .expect("GAME_SENS is not a number");
         let esp_port = var("ESP_PORT").ok();
+        // Compared against `dist`, which is a frame-pixel distance because
+        // `min_zone` comes straight off bbox dimensions.
         let fov = var("FOV")
-            .unwrap_or((screen_width as f32).to_string())
+            .unwrap_or((frame_width as f32).to_string())
             .parse()
             .unwrap();
         let default_aim_mode = var("DEFAULT_AIM_MODE")
@@ -257,6 +334,9 @@ impl Config {
             ndi_timeout,
             screen_width,
             screen_height,
+            frame_width,
+            frame_height,
+            frame_to_screen,
             region_top,
             region_left,
             region_width,
@@ -304,6 +384,87 @@ impl Config {
             esp_port,
             fov,
             default_aim_mode,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_v4l2_source_measures_frames_in_capture_pixels() {
+        let (frame, scale) = frame_geometry("elgato://", (2560, 1440), (1920, 1080));
+        assert_eq!(frame, (1920, 1080));
+        assert!((scale.0 - 1440. / 1080.).abs() < 1e-9);
+        assert!((scale.1 - 1440. / 1080.).abs() < 1e-9);
+        // `v4l2://` is the same source behind a different scheme.
+        assert_eq!(
+            frame_geometry("v4l2:///dev/video1", (2560, 1440), (1920, 1080)),
+            frame_geometry("elgato://", (2560, 1440), (1920, 1080))
+        );
+    }
+
+    #[test]
+    fn a_matching_capture_needs_no_scaling() {
+        let (frame, scale) = frame_geometry("elgato://", (2560, 1440), (2560, 1440));
+        assert_eq!(frame, (2560, 1440));
+        assert_eq!(scale, (1.0, 1.0));
+    }
+
+    /// NDI and UDP never look at `CAPTURE_*`, so scaling by it would apply a
+    /// factor derived from a number that describes nothing.
+    #[test]
+    fn non_v4l2_sources_are_pinned_to_the_screen() {
+        for source in ["ndi://192.168.2.3", "udp://127.0.0.1:4200", "assets/clip.mp4"] {
+            let (frame, scale) = frame_geometry(source, (2560, 1440), (1920, 1080));
+            assert_eq!(frame, (2560, 1440), "{source}");
+            assert_eq!(scale, (1.0, 1.0), "{source}");
+        }
+    }
+
+    #[test]
+    fn a_zero_capture_size_falls_back_to_the_screen() {
+        let (frame, scale) = frame_geometry("elgato://", (1920, 1080), (0, 0));
+        assert_eq!(frame, (1920, 1080));
+        assert_eq!(scale, (1.0, 1.0));
+    }
+
+    #[test]
+    fn mouse_counts_scale_a_frame_delta_into_screen_pixels() {
+        // 1:1 capture: the delta passes through the old formula unchanged.
+        let (dx, dy) = mouse_counts((100., -50.), (1.0, 1.0), 2.0, 800.);
+        assert!((dx - 100. * WIN_DPI_SCALE_FACTOR / 2.0 / 800.).abs() < 1e-9);
+        assert!((dy + 50. * WIN_DPI_SCALE_FACTOR / 2.0 / 800.).abs() < 1e-9);
+
+        // Capturing 1920 of a 2560-wide screen: a 100 px frame delta is really
+        // a 133.33 px move in the game, so it must produce more counts.
+        let scale = 2560. / 1920.;
+        let (wide, _) = mouse_counts((100., 0.), (scale, scale), 2.0, 800.);
+        assert!((wide / dx - scale).abs() < 1e-9, "{wide} vs {dx}");
+    }
+
+    #[test]
+    fn mouse_counts_are_symmetric_and_zero_at_the_crosshair() {
+        assert_eq!(mouse_counts((0., 0.), (1.3, 1.3), 1.5, 1000.), (0., 0.));
+        let (px, py) = mouse_counts((30., 40.), (1.3, 1.3), 1.5, 1000.);
+        let (nx, ny) = mouse_counts((-30., -40.), (1.3, 1.3), 1.5, 1000.);
+        assert!((px + nx).abs() < 1e-12 && (py + ny).abs() < 1e-12);
+    }
+
+    /// End to end: a target at the centre of the frame is the crosshair, so it
+    /// must produce no mouse movement no matter how the capture is scaled.
+    #[test]
+    fn a_target_on_the_crosshair_never_moves_the_mouse() {
+        for (screen, capture) in [
+            ((2560u32, 1440u32), (2560u32, 1440u32)),
+            ((2560, 1440), (1920, 1080)),
+            ((1920, 1080), (1280, 720)),
+        ] {
+            let ((frame_w, frame_h), scale) = frame_geometry("elgato://", screen, capture);
+            let crosshair = (frame_w as f32 / 2., frame_h as f32 / 2.);
+            let delta = (crosshair.0 - frame_w as f32 / 2., crosshair.1 - frame_h as f32 / 2.);
+            assert_eq!(mouse_counts(delta, scale, 1.0, 1000.), (0., 0.));
         }
     }
 }

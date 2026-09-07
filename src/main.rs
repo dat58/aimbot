@@ -2,7 +2,7 @@
 #![allow(unused_imports)]
 use aimbot::{
     aim::{AimMode, Mode},
-    config::{Config, WIN_DPI_SCALE_FACTOR},
+    config::{Config, mouse_counts},
     esp_button::EspButton,
     event::start_event_listener,
     model::{Bbox, Model, Point2f},
@@ -37,9 +37,12 @@ fn main() -> Result<()> {
         .init();
     ort::init().commit()?;
     let config = Config::new();
+    // Detections and `REGION_*` are in frame pixels, so the crosshair has to be
+    // the centre of the frame, not of the screen. They differ whenever the
+    // capture does not match the screen resolution.
     let crosshair = Point2f::new(
-        config.screen_width as f32 / 2.,
-        config.screen_height as f32 / 2.,
+        config.frame_width as f32 / 2.,
+        config.frame_height as f32 / 2.,
     );
     let serving_port_event_listener = config.event_listener_port;
     let makcu_port = config.makcu_port.clone();
@@ -248,14 +251,15 @@ fn main() -> Result<()> {
 
                             #[cfg(not(feature = "disable-mouse"))]
                             if dist > min_zone && dist <= config.fov {
-                                let dx = (destination.x() - crosshair.x()) as f64
-                                    * WIN_DPI_SCALE_FACTOR
-                                    / config.game_sens
-                                    / config.mouse_dpi;
-                                let dy = (destination.y() - crosshair.y()) as f64
-                                    * WIN_DPI_SCALE_FACTOR
-                                    / config.game_sens
-                                    / config.mouse_dpi;
+                                let (dx, dy) = mouse_counts(
+                                    (
+                                        destination.x() - crosshair.x(),
+                                        destination.y() - crosshair.y(),
+                                    ),
+                                    config.frame_to_screen,
+                                    config.game_sens,
+                                    config.mouse_dpi,
+                                );
                                 let use_trigger = trigger.load(Ordering::Acquire);
                                 if (use_trigger
                                     && (esp_button1.load(Ordering::Acquire)

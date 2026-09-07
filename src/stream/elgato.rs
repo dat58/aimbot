@@ -247,8 +247,6 @@ pub struct Elgato {
     jpeg: Option<RoiJpeg>,
     /// Reusable gather buffer for planar regions.
     scratch: Vec<u8>,
-    /// `SCREEN_*`, which is the coordinate space `REGION_*` is written in.
-    screen: (u32, u32),
 }
 
 impl Elgato {
@@ -302,7 +300,6 @@ impl Elgato {
             wanted_region,
             jpeg: None,
             scratch: Vec::new(),
-            screen: (config.screen_width, config.screen_height),
         };
         this.apply_region()?;
         this.log_mode();
@@ -318,39 +315,6 @@ impl Elgato {
     fn apply_region(&mut self) -> Result<()> {
         let layout = self.layout;
         self.region = None;
-
-        // `REGION_*` is written in `SCREEN_*` coordinates but indexes the frame
-        // directly, here and in `crate::model`. If the card does not deliver a
-        // frame the size of the screen, the region lands somewhere else
-        // entirely and nothing downstream can tell.
-        let (screen_w, screen_h) = self.screen;
-        if screen_w as i32 != layout.width || screen_h as i32 != layout.height {
-            let centred = self.wanted_region.map_or_else(String::new, |r| {
-                format!(
-                    " A centred {}x{} region on this frame is REGION_LEFT={} REGION_TOP={}.",
-                    r.w,
-                    r.h,
-                    (layout.width - r.w) / 2,
-                    (layout.height - r.h) / 2,
-                )
-            });
-            tracing::warn!(
-                "[Elgato] SCREEN is {}x{} but the card delivers {}x{}. Detections come out \
-                 in FRAME pixels (REGION_* indexes the frame directly), while `crosshair`, \
-                 `fov` and the mouse dx/dy are computed in SCREEN pixels — so target \
-                 selection and every mouse move are off by the {:.3}x/{:.3}y difference. \
-                 Set CAPTURE_WIDTH/CAPTURE_HEIGHT to {}x{} so the two spaces coincide.{}",
-                screen_w,
-                screen_h,
-                layout.width,
-                layout.height,
-                screen_w as f32 / layout.width as f32,
-                screen_h as f32 / layout.height as f32,
-                screen_w,
-                screen_h,
-                centred,
-            );
-        }
 
         let Some(region) = self.wanted_region else {
             self.jpeg = None;

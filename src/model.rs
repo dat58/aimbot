@@ -19,35 +19,43 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::time::Instant;
 
-/// How the incoming frame maps onto the screen.
+/// How the received image maps onto a whole capture frame.
 ///
-/// The three fields come apart when the capture layer already cropped the frame
-/// down to `REGION_*` (`CAPTURE_ROI`): `read` then covers the whole frame,
-/// while `origin` and `bound` still speak screen coordinates so detections land
+/// Every coordinate here — and every detection the model emits — is in
+/// *frame* pixels, the space `REGION_*` is written in. Converting to the screen
+/// pixels the game renders at happens once, at the mouse delta
+/// ([`crate::config::mouse_counts`]).
+///
+/// The fields come apart when the capture layer already cropped the image down
+/// to `REGION_*` (`CAPTURE_ROI`): `read` then covers the whole image, while
+/// `origin` and `bound` still speak whole-frame coordinates so detections land
 /// where the crosshair does.
 #[derive(Clone, Copy, Debug)]
 struct Source {
     /// Rect to sample inside the frame.
     read: Rect,
-    /// Screen-space position of `read`, added back onto every detection.
+    /// Whole-frame position of `read`, added back onto every detection.
     origin: Point,
-    /// Screen-space extent detections are clamped to.
+    /// Frame-space extent detections are clamped to.
     bound: Size,
-    /// Screen-space position of the *frame*, which is not the same thing as
-    /// `origin`: reading a region out of a whole frame leaves the frame itself
-    /// at `(0, 0)`. Only a frame the capture layer already cropped down to the
-    /// region sits at the region's origin. Anything drawing a screen-space
-    /// detection onto the frame subtracts this.
+    /// Whole-frame position of the *received image*, which is not the same
+    /// thing as `origin`: reading a region out of a whole frame leaves the
+    /// image itself at `(0, 0)`. Only an image the capture layer already
+    /// cropped down to the region sits at the region's origin. Anything drawing
+    /// a detection onto the image subtracts this.
     frame_origin: Point,
 }
 
-/// Where to read from a `frame_w` x `frame_h` frame, and how to put detections
-/// back into screen coordinates.
+/// Where to read from the `frame_w` x `frame_h` image just received, and how to
+/// put detections back into whole-frame coordinates.
+///
+/// `frame` is the geometry of an *uncropped* frame, which the received image no
+/// longer reports once the capture layer has cropped it down to the region.
 ///
 /// Pulled out of [`Model`] as a pure function because this is the arithmetic
 /// that decides whether a detection lands on the crosshair or hundreds of
 /// pixels away, and a `Model` needs an ONNX session to exist.
-fn source_for(crop: bool, roi: Rect, screen: Size, frame_w: i32, frame_h: i32) -> Result<Source> {
+fn source_for(crop: bool, roi: Rect, frame: Size, frame_w: i32, frame_h: i32) -> Result<Source> {
     let (w, h) = (frame_w, frame_h);
     if w <= 0 || h <= 0 {
         bail!("[Model] empty frame");
@@ -67,14 +75,14 @@ fn source_for(crop: bool, roi: Rect, screen: Size, frame_w: i32, frame_h: i32) -
             roi.height
         );
     }
-    // A frame that is exactly the configured region arrived pre-cropped from
+    // An image that is exactly the configured region arrived pre-cropped from
     // the capture layer, so cropping again would cut a region out of a region.
-    // The read rect covers the frame while origin/bound stay screen-space.
+    // The read rect covers it while origin/bound stay in whole-frame space.
     if w == roi.width && h == roi.height {
         return Ok(Source {
             read: Rect::new(0, 0, w, h),
             origin: Point::new(roi.x, roi.y),
-            bound: screen,
+            bound: frame,
             // The frame *is* the region, so it starts where the region does.
             frame_origin: Point::new(roi.x, roi.y),
         });
@@ -111,9 +119,9 @@ pub struct Model {
     iou: f32,
     roi: Rect,
     crop: bool,
-    /// Screen geometry detections are expressed in. Only equal to the frame
-    /// size when the capture layer hands over whole frames.
-    screen: Size,
+    /// Geometry of an uncropped frame. Needed because a pre-cropped frame
+    /// cannot report the size of the frame it came out of.
+    frame: Size,
     /// `v_light_*` model: nearest-neighbour stretch preprocess and a raw
     /// multi-class output instead of the letterboxed two-class path.
     light: bool,
@@ -196,8 +204,10 @@ impl Model {
             .collect::<Vec<_>>()
             .pop()
             .unwrap();
-        let crop = config.screen_width != config.region_width
-            || config.screen_height != config.region_height;
+        // `REGION_*` is measured in frame pixels, so whether a crop is needed is
+        // a question about the frame, not about the screen.
+        let crop = config.frame_width != config.region_width
+            || config.frame_height != config.region_height;
         let light = config.light_model;
         tracing::info!(
             "[Model] {} pipeline: {}x{} input",
@@ -224,7 +234,7 @@ impl Model {
                 config.region_height as i32,
             ),
             crop,
-            screen: Size::new(config.screen_width as i32, config.screen_height as i32),
+            frame: Size::new(config.frame_width as i32, config.frame_height as i32),
             light,
             light_input,
         })
@@ -243,17 +253,16 @@ impl Model {
 
     /// Region of the frame the model looks at, and where it sits on screen.
     fn source(&self, mat: &Mat) -> Result<Source> {
-        source_for(self.crop, self.roi, self.screen, mat.cols(), mat.rows())
+        source_for(self.crop, self.roi, self.frame, mat.cols(), mat.rows())
     }
 
-    /// Screen-space position of `frame`'s top-left corner.
+    /// Whole-frame position of `frame`'s top-left corner.
     ///
-    /// Detections come out in screen coordinates, so anything that wants to
-    /// draw them onto the frame — or express them relative to it — has to
-    /// subtract this. `(0, 0)` for a whole frame; the region origin only when
-    /// the capture layer pre-cropped the frame down to the region
-    /// (`CAPTURE_ROI`). Shares `source()` with inference so the two cannot
-    /// disagree about where the frame sits.
+    /// Detections come out in whole-frame coordinates, so anything that wants
+    /// to draw them onto the received image — or express them relative to it —
+    /// has to subtract this. `(0, 0)` for a whole frame; the region origin only
+    /// when the capture layer pre-cropped it (`CAPTURE_ROI`). Shares `source()`
+    /// with inference so the two cannot disagree about where the image sits.
     pub fn frame_origin(&self, frame: &Mat) -> Result<Point> {
         Ok(self.source(frame)?.frame_origin)
     }
@@ -758,7 +767,8 @@ impl Bboxes {
 mod tests {
     use super::*;
 
-    const SCREEN: Size = Size {
+    /// Geometry of an uncropped frame.
+    const FRAME: Size = Size {
         width: 1920,
         height: 1080,
     };
@@ -770,9 +780,9 @@ mod tests {
         height: 192,
     };
 
-    /// Screen coordinate a detection at `(mx, my)` in model space lands on.
+    /// Whole-frame coordinate a detection at `(mx, my)` in model space lands on.
     /// Mirrors the arithmetic in `decode_light` so the two stay in step.
-    fn to_screen(src: &Source, input_size: i32, mx: f32, my: f32) -> (f32, f32) {
+    fn to_frame(src: &Source, input_size: i32, mx: f32, my: f32) -> (f32, f32) {
         let sx = src.read.width as f32 / input_size as f32;
         let sy = src.read.height as f32 / input_size as f32;
         (mx * sx + src.origin.x as f32, my * sy + src.origin.y as f32)
@@ -780,47 +790,47 @@ mod tests {
 
     #[test]
     fn a_whole_frame_is_read_through_the_region() {
-        let src = source_for(true, REGION, SCREEN, 1920, 1080).unwrap();
+        let src = source_for(true, REGION, FRAME, 1920, 1080).unwrap();
         assert_eq!(src.read, REGION);
         assert_eq!(src.origin, Point::new(864, 444));
         assert_eq!(src.bound, Size::new(1920, 1080));
     }
 
     #[test]
-    fn a_pre_cropped_frame_is_read_whole_but_stays_screen_space() {
-        let src = source_for(true, REGION, SCREEN, 192, 192).unwrap();
+    fn a_pre_cropped_image_is_read_whole_but_stays_in_frame_space() {
+        let src = source_for(true, REGION, FRAME, 192, 192).unwrap();
         assert_eq!(src.read, Rect::new(0, 0, 192, 192));
         // The offset has to survive, or every detection lands at the top-left
         // corner of the screen instead of on the crosshair.
         assert_eq!(src.origin, Point::new(864, 444));
-        // Bounding to the 192x192 frame would clamp every box to the edge.
-        assert_eq!(src.bound, SCREEN);
+        // Bounding to the 192x192 image would clamp every box to the edge.
+        assert_eq!(src.bound, FRAME);
     }
 
     /// The property the whole `CAPTURE_ROI` change rests on: a detection maps
     /// to the same screen pixel whether the capture layer cropped or not.
     #[test]
-    fn both_paths_map_a_detection_to_the_same_screen_pixel() {
-        let whole = source_for(true, REGION, SCREEN, 1920, 1080).unwrap();
-        let cropped = source_for(true, REGION, SCREEN, 192, 192).unwrap();
+    fn both_paths_map_a_detection_to_the_same_frame_pixel() {
+        let whole = source_for(true, REGION, FRAME, 1920, 1080).unwrap();
+        let cropped = source_for(true, REGION, FRAME, 192, 192).unwrap();
         for &(mx, my) in &[(0., 0.), (96., 96.), (191., 191.), (48.5, 137.25)] {
             assert_eq!(
-                to_screen(&whole, 192, mx, my),
-                to_screen(&cropped, 192, mx, my),
+                to_frame(&whole, 192, mx, my),
+                to_frame(&cropped, 192, mx, my),
                 "model-space ({mx}, {my}) diverges"
             );
         }
         // Centre of the region is the centre of the screen for this config.
-        assert_eq!(to_screen(&cropped, 192, 96., 96.), (960., 540.));
+        assert_eq!(to_frame(&cropped, 192, 96., 96.), (960., 540.));
     }
 
     #[test]
     fn a_region_of_a_different_size_still_scales_per_axis() {
         // A 256-wide region into a 192 input stretches by 4/3 on that axis.
         let roi = Rect::new(800, 400, 256, 192);
-        let src = source_for(true, roi, SCREEN, 256, 192).unwrap();
-        assert_eq!(to_screen(&src, 192, 0., 0.), (800., 400.));
-        assert_eq!(to_screen(&src, 192, 192., 192.), (800. + 256., 400. + 192.));
+        let src = source_for(true, roi, FRAME, 256, 192).unwrap();
+        assert_eq!(to_frame(&src, 192, 0., 0.), (800., 400.));
+        assert_eq!(to_frame(&src, 192, 192., 192.), (800. + 256., 400. + 192.));
     }
 
     /// `frame_origin` is what the debug overlay subtracts, and it is NOT
@@ -831,27 +841,27 @@ mod tests {
     fn frame_origin_locates_the_frame_not_the_region() {
         // Whole frame: the frame starts at the screen's corner even though only
         // the region is read out of it.
-        let whole = source_for(true, REGION, SCREEN, 1920, 1080).unwrap();
+        let whole = source_for(true, REGION, FRAME, 1920, 1080).unwrap();
         assert_eq!(whole.origin, Point::new(864, 444));
         assert_eq!(whole.frame_origin, Point::new(0, 0));
 
         // Pre-cropped: the frame *is* the region.
-        let cropped = source_for(true, REGION, SCREEN, 192, 192).unwrap();
+        let cropped = source_for(true, REGION, FRAME, 192, 192).unwrap();
         assert_eq!(cropped.origin, Point::new(864, 444));
         assert_eq!(cropped.frame_origin, Point::new(864, 444));
 
         // No crop at all.
-        let plain = source_for(false, REGION, SCREEN, 1920, 1080).unwrap();
+        let plain = source_for(false, REGION, FRAME, 1920, 1080).unwrap();
         assert_eq!(plain.frame_origin, Point::new(0, 0));
     }
 
     /// A detection at the centre of the region must land inside whichever frame
     /// it is drawn onto, in both capture modes.
     #[test]
-    fn a_screen_detection_draws_inside_the_frame_in_both_modes() {
+    fn a_detection_draws_inside_the_image_in_both_capture_modes() {
         for (fw, fh) in [(1920, 1080), (192, 192)] {
-            let src = source_for(true, REGION, SCREEN, fw, fh).unwrap();
-            let (sx, sy) = to_screen(&src, 192, 96., 96.);
+            let src = source_for(true, REGION, FRAME, fw, fh).unwrap();
+            let (sx, sy) = to_frame(&src, 192, 96., 96.);
             // Same screen pixel regardless of mode.
             assert_eq!((sx, sy), (960., 540.), "frame {fw}x{fh}");
 
@@ -871,16 +881,16 @@ mod tests {
     #[test]
     fn an_off_centre_region_shifts_exactly() {
         let roi = Rect::new(1184, 624, 192, 192);
-        let screen = Size::new(2560, 1440);
+        let frame = Size::new(2560, 1440);
         // Whole 2560x1440 frame: no shift, box drawn at its screen position.
-        let whole = source_for(true, roi, screen, 2560, 1440).unwrap();
+        let whole = source_for(true, roi, frame, 2560, 1440).unwrap();
         assert_eq!(whole.frame_origin, Point::new(0, 0));
-        assert_eq!(to_screen(&whole, 192, 96., 96.), (1280., 720.));
+        assert_eq!(to_frame(&whole, 192, 96., 96.), (1280., 720.));
 
         // Pre-cropped: shift by the region origin puts it at the frame centre.
-        let cropped = source_for(true, roi, screen, 192, 192).unwrap();
+        let cropped = source_for(true, roi, frame, 192, 192).unwrap();
         assert_eq!(cropped.frame_origin, Point::new(1184, 624));
-        let (sx, sy) = to_screen(&cropped, 192, 96., 96.);
+        let (sx, sy) = to_frame(&cropped, 192, 96., 96.);
         assert_eq!(
             (sx - 1184., sy - 624.),
             (96., 96.),
@@ -890,7 +900,7 @@ mod tests {
 
     #[test]
     fn no_crop_reads_and_bounds_the_frame_itself() {
-        let src = source_for(false, REGION, SCREEN, 1280, 720).unwrap();
+        let src = source_for(false, REGION, FRAME, 1280, 720).unwrap();
         assert_eq!(src.read, Rect::new(0, 0, 1280, 720));
         assert_eq!(src.origin, Point::new(0, 0));
         assert_eq!(src.bound, Size::new(1280, 720));
@@ -902,11 +912,11 @@ mod tests {
         // edges, which is the failure the whole-frame path has to catch.
         // 1600+192 = 1792 and 800+192 = 992: inside 1080p, off the edge at 720p.
         let low = Rect::new(1600, 800, 192, 192);
-        assert!(source_for(true, low, SCREEN, 1280, 720).is_err());
+        assert!(source_for(true, low, FRAME, 1280, 720).is_err());
         // ...and the same region is fine once the frame is big enough.
-        assert!(source_for(true, low, SCREEN, 1920, 1080).is_ok());
-        assert!(source_for(true, Rect::new(-1, 0, 192, 192), SCREEN, 1920, 1080).is_err());
-        assert!(source_for(true, Rect::new(0, 0, 0, 192), SCREEN, 1920, 1080).is_err());
-        assert!(source_for(true, REGION, SCREEN, 0, 0).is_err());
+        assert!(source_for(true, low, FRAME, 1920, 1080).is_ok());
+        assert!(source_for(true, Rect::new(-1, 0, 192, 192), FRAME, 1920, 1080).is_err());
+        assert!(source_for(true, Rect::new(0, 0, 0, 192), FRAME, 1920, 1080).is_err());
+        assert!(source_for(true, REGION, FRAME, 0, 0).is_err());
     }
 }

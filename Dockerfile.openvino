@@ -47,4 +47,4 @@ COPY --from=builder /app/target/release/aimbot .
 COPY --from=builder /app/target/release/button_test .
 COPY --from=builder /app/target/release/mouse_test .
 RUN ldd ./aimbot | grep -F 'not found' && exit 1 || echo "all dependencies resolved"
-ENTRYPOINT ["./aimbot"]
+#ENTRYPOINT ["./aimbot"]

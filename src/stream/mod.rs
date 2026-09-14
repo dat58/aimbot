@@ -4,6 +4,7 @@ mod ndi;
 mod ndi4;
 #[cfg(feature = "ndi6")]
 mod ndi6;
+pub mod roi_jpeg;
 mod udp;
 pub mod v4l2;
 pub use elgato::Elgato;

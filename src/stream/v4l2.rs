@@ -23,7 +23,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::ffi::CString;
 use std::io;
 use std::os::raw::{c_int, c_void};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // videodev2.h constants
@@ -49,6 +49,8 @@ const V4L2_CAP_STREAMING: u32 = 0x0400_0000;
 const V4L2_CAP_DEVICE_CAPS: u32 = 0x8000_0000;
 const V4L2_CAP_TIMEPERFRAME: u32 = 0x1000;
 const V4L2_BUF_FLAG_ERROR: u32 = 0x0000_0040;
+const V4L2_BUF_FLAG_TIMESTAMP_MASK: u32 = 0x0000_e000;
+const V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC: u32 = 0x0000_2000;
 
 /// Build a FourCC the way `v4l2_fourcc()` does.
 pub const fn fourcc(a: u8, b: u8, c: u8, d: u8) -> u32 {
@@ -328,6 +330,19 @@ unsafe fn xioctl<T>(fd: c_int, request: u64, arg: *mut T) -> io::Result<()> {
     }
 }
 
+/// `CLOCK_MONOTONIC` now, on the same timebase `uvcvideo` stamps buffers with.
+/// Needed because `std::time::Instant` is opaque and cannot be compared to a
+/// raw kernel timestamp.
+pub fn monotonic_now() -> Duration {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // Cannot fail for CLOCK_MONOTONIC; a zero on error just yields no age.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    Duration::new(ts.tv_sec.max(0) as u64, ts.tv_nsec.max(0) as u32)
+}
+
 fn cstr_name(bytes: &[u8]) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..end]).into_owned()
@@ -382,9 +397,12 @@ pub struct Format {
 pub struct FrameMeta {
     pub index: u32,
     pub sequence: u32,
-    /// Driver timestamp of the frame, on the same clock as
-    /// `CLOCK_MONOTONIC` for `uvcvideo`.
+    /// Driver timestamp of the frame. Only comparable to [`monotonic_now`]
+    /// when `timestamp_monotonic` is set.
     pub timestamp: Duration,
+    /// The driver stamped this buffer on `CLOCK_MONOTONIC`, so
+    /// `monotonic_now() - timestamp` is the real age of the frame.
+    pub timestamp_monotonic: bool,
     pub bytes_used: u32,
     /// Frames thrown away during this grab because a newer one was queued.
     pub dropped_stale: u32,
@@ -512,8 +530,13 @@ impl Capture {
     /// The buffer is handed back to the driver as soon as `f` returns, error or
     /// not, so `f` must copy or consume whatever it needs. Keeping the callback
     /// short is the whole point: the driver is one buffer down until it ends.
-    pub fn with_frame<T>(&mut self, f: impl FnOnce(&[u8], &FrameMeta) -> Result<T>) -> Result<T> {
+    pub fn with_frame<T>(
+        &mut self,
+        f: impl FnOnce(&[u8], &FrameMeta, Duration) -> Result<T>,
+    ) -> Result<T> {
+        let waited = Instant::now();
         let (index, meta) = self.dequeue_newest()?;
+        let waited = waited.elapsed();
         let bytes = {
             let mapping = &self.buffers[index as usize];
             // Some drivers leave `bytesused` at zero for uncompressed formats,
@@ -525,7 +548,7 @@ impl Capture {
             };
             &mapping.as_slice()[..len]
         };
-        let result = f(bytes, &meta);
+        let result = f(bytes, &meta, waited);
         // Requeue before propagating: a leaked buffer starves the ring.
         let requeue = self.queue_buffer(index);
         let value = result?;
@@ -939,6 +962,8 @@ impl Capture {
                     buf.timestamp.tv_sec.max(0) as u64,
                     (buf.timestamp.tv_usec.max(0) as u32).saturating_mul(1000),
                 ),
+                timestamp_monotonic: buf.flags & V4L2_BUF_FLAG_TIMESTAMP_MASK
+                    == V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC,
                 bytes_used: buf.bytesused,
                 dropped_stale: dropped,
             },

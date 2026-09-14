@@ -160,8 +160,8 @@ impl AimMode {
                         ))
                     } else {
                         let delta_y = random.random_range(
-                            -((crosshair.y() - bbox.ymin()) as i32).min(10)
-                                ..((bbox.ymax() - crosshair.y()) as i32).min(12),
+                            -((crosshair.y() - bbox.ymin()) as i32).min(14)
+                                ..((bbox.ymax() - crosshair.y()) as i32).min(7),
                         ) as f32;
                         let y_rand = crosshair.y() + delta_y;
                         Some((

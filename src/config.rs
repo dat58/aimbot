@@ -416,7 +416,11 @@ mod tests {
     /// factor derived from a number that describes nothing.
     #[test]
     fn non_v4l2_sources_are_pinned_to_the_screen() {
-        for source in ["ndi://192.168.2.3", "udp://127.0.0.1:4200", "assets/clip.mp4"] {
+        for source in [
+            "ndi://192.168.2.3",
+            "udp://127.0.0.1:4200",
+            "assets/clip.mp4",
+        ] {
             let (frame, scale) = frame_geometry(source, (2560, 1440), (1920, 1080));
             assert_eq!(frame, (2560, 1440), "{source}");
             assert_eq!(scale, (1.0, 1.0), "{source}");
@@ -463,7 +467,10 @@ mod tests {
         ] {
             let ((frame_w, frame_h), scale) = frame_geometry("elgato://", screen, capture);
             let crosshair = (frame_w as f32 / 2., frame_h as f32 / 2.);
-            let delta = (crosshair.0 - frame_w as f32 / 2., crosshair.1 - frame_h as f32 / 2.);
+            let delta = (
+                crosshair.0 - frame_w as f32 / 2.,
+                crosshair.1 - frame_h as f32 / 2.,
+            );
             assert_eq!(mouse_counts(delta, scale, 1.0, 1000.), (0., 0.));
         }
     }

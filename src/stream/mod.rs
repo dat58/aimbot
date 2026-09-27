@@ -15,6 +15,7 @@ pub use ndi4::*;
 pub use ndi6::*;
 pub use udp::*;
 
+use crate::config::Config;
 use anyhow::Result;
 use crossbeam::queue::ArrayQueue;
 use opencv::core::Mat;
@@ -34,6 +35,36 @@ pub trait StreamCapture: Send {
     fn capture(&mut self) -> Result<Mat>;
     fn stream_info(&self) -> Result<StreamInfo>;
     fn reconnect(&mut self) -> Result<()>;
+}
+
+/// Open the frame source `SOURCE_STREAM` names: NDI for `ndi://`, the capture
+/// card for `elgato://` or `v4l2://`, and FFmpeg for anything else.
+pub fn open_source(config: &Config) -> Result<Box<dyn StreamCapture>> {
+    Ok(if config.source_stream.starts_with("ndi://") {
+        let source_stream = config
+            .source_stream
+            .trim()
+            .split(',')
+            .map(|source| source.trim_start_matches("ndi://"))
+            .collect::<Vec<&str>>()
+            .join(",");
+        Box::new(NDI::new(
+            &source_stream,
+            config.ndi_source_name.clone(),
+            config.ndi_timeout,
+        )?)
+    } else if let Some(device) = config
+        .source_stream
+        .trim()
+        .strip_prefix("elgato://")
+        .or_else(|| config.source_stream.trim().strip_prefix("v4l2://"))
+    {
+        // `elgato://` on its own falls back to CAPTURE_DEVICE.
+        let device = (!device.is_empty()).then_some(device);
+        Box::new(Elgato::new(config, device)?)
+    } else {
+        Box::new(UDP::new(config.source_stream.as_str())?)
+    })
 }
 
 pub fn handle_capture(

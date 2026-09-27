@@ -6,8 +6,8 @@ use aimbot::{
     esp_button::EspButton,
     event::start_event_listener,
     model::{Bbox, Model, Point2f},
-    mouse::MouseVirtual,
-    stream::{Elgato, NDI, StreamCapture, UDP, handle_capture},
+    mouse::{MouseVirtual, SmoothAim},
+    stream::{handle_capture, open_source},
 };
 use anyhow::{Result, anyhow};
 use crossbeam::queue::ArrayQueue;
@@ -48,32 +48,7 @@ fn main() -> Result<()> {
     let makcu_port = config.makcu_port.clone();
     let makcu_baud = config.makcu_baud;
     let esp_port = config.esp_port.clone();
-    let source_stream: Box<dyn StreamCapture> = if config.source_stream.starts_with("ndi://") {
-        let source_stream = config
-            .source_stream
-            .trim()
-            .split(',')
-            .into_iter()
-            .map(|source| source.trim_start_matches("ndi://"))
-            .collect::<Vec<&str>>();
-        let source_stream = source_stream.join(",");
-        Box::new(NDI::new(
-            &source_stream,
-            config.ndi_source_name.clone(),
-            config.ndi_timeout,
-        )?)
-    } else if let Some(device) = config
-        .source_stream
-        .trim()
-        .strip_prefix("elgato://")
-        .or_else(|| config.source_stream.trim().strip_prefix("v4l2://"))
-    {
-        // `elgato://` on its own falls back to CAPTURE_DEVICE.
-        let device = (!device.is_empty()).then_some(device);
-        Box::new(Elgato::new(&config, device)?)
-    } else {
-        Box::new(UDP::new(config.source_stream.as_str())?)
-    };
+    let source_stream = open_source(&config)?;
     let model = Model::new(config.clone())?;
     let frame_queue = Arc::new(ArrayQueue::<Mat>::new(1));
     let use_trigger = Arc::new(AtomicBool::new(true));
@@ -221,6 +196,13 @@ fn main() -> Result<()> {
             };
 
             let mut random = rand::rng();
+            #[cfg(not(feature = "disable-mouse"))]
+            let mut smooth = SmoothAim::new(config.smooth, config.makcu_baud);
+            // Fitts measures *visual* difficulty, so it wants screen pixels,
+            // while `dist` and `min_zone` are frame pixels. The two coincide
+            // only when the capture matches the screen.
+            #[cfg(not(feature = "disable-mouse"))]
+            let px_scale = ((config.frame_to_screen.0 + config.frame_to_screen.1) / 2.) as f32;
 
             loop {
                 if auto_aim.load(Ordering::Relaxed) {
@@ -237,10 +219,11 @@ fn main() -> Result<()> {
                         tracing::debug!("[Model] bboxes: {:?}", bboxes);
 
                         if bboxes.len() > 0 {
-                            // if esp button 2 is triggered it's always aim head
+                            // if esp button 2 is triggered it's always aim smooth
                             let esp_button2_pressed = esp_button2.load(Ordering::Acquire);
                             let (destination, min_zone) = if esp_button2_pressed {
-                                let (destination, min_zone) = aim.aim_head(&bboxes).unwrap();
+                                let (destination, min_zone) =
+                                    aim.aim_smooth(&bboxes, &crosshair, &mut random).unwrap();
                                 (destination, min_zone * config.scale_min_zone2)
                             } else {
                                 let (destination, min_zone) =
@@ -261,12 +244,42 @@ fn main() -> Result<()> {
                                     config.mouse_dpi,
                                 );
                                 let use_trigger = trigger.load(Ordering::Acquire);
-                                if (use_trigger
+                                let fire = (use_trigger
                                     && (esp_button1.load(Ordering::Acquire)
                                         || esp_button2_pressed
                                         || mouse.is_side4_pressing()))
-                                    || (!use_trigger)
-                                {
+                                    || (!use_trigger);
+                                // aim_smooth (esp button 2) always moves like a
+                                // hand; the ordinary modes do when MOVE_SMOOTH
+                                // is on.
+                                let use_smooth = esp_button2_pressed || config.move_smooth;
+                                if fire && use_smooth {
+                                    // Blocks this thread for the length of the
+                                    // flick, so at most one is ever in flight.
+                                    // It does not make the next frame current:
+                                    // a frame shows the game as it was a
+                                    // capture latency ago, so a flick shorter
+                                    // than that latency can be commanded twice.
+                                    mouse.move_smooth(
+                                        &mut smooth,
+                                        (dx, dy),
+                                        dist * px_scale,
+                                        // Fitts's W is the target's full
+                                        // width; `min_zone` is the radius the
+                                        // aim is allowed to land inside, so it
+                                        // doubles. Passing the radius would
+                                        // add a whole bit of difficulty and
+                                        // make every flick a slope longer.
+                                        2. * min_zone * px_scale,
+                                        &mut random,
+                                        || {
+                                            let t = trigger.load(Ordering::Acquire);
+                                            !t || esp_button1.load(Ordering::Acquire)
+                                                || esp_button2_pressed
+                                                || mouse.is_side4_pressing()
+                                        },
+                                    )?;
+                                } else if fire {
                                     mouse.move_bezier(dx, dy, &mut random)?;
                                 }
                             }

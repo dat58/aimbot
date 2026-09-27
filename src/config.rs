@@ -59,6 +59,105 @@ pub fn mouse_counts(
     )
 }
 
+/// Report cadence for the smooth-aim playback, derived from the link speed.
+///
+/// A `km.move(-12,-7)` line is about 18 bytes and 8N1 puts ten bits on the
+/// wire per byte, so 115200 baud carries roughly 640 commands a second — at
+/// 250 Hz the link stays near 39% busy even in the pathological case where
+/// every report is non-zero. At 2M and above the same arithmetic puts 1000 Hz
+/// under 10%. The 1000 Hz ceiling is deliberate rather than a throughput
+/// limit: no real mouse reports faster, so a higher cadence would itself be a
+/// signature.
+pub fn poll_hz_for_baud(baud: u32) -> u32 {
+    if baud >= 2_000_000 { 1000 } else { 250 }
+}
+
+/// Numeric tuning for the human-flick model behind
+/// [`crate::mouse::MouseVirtual::move_smooth`].
+///
+/// Whether that model is used at all is not decided here. `MOVE_SMOOTH` picks
+/// it over `move_bezier` for the ordinary aim modes, and
+/// [`crate::aim::AimMode::aim_smooth`] — the ESP button 2 path — always uses
+/// it regardless.
+#[derive(Debug, Clone, Copy)]
+pub struct SmoothConfig {
+    /// Report cadence. `0` derives it from `MAKCU_BAUD`; see
+    /// [`poll_hz_for_baud`].
+    pub poll_hz: u32,
+    /// Fitts intercept, milliseconds.
+    pub fitts_a_ms: f64,
+    /// Fitts slope, milliseconds per bit of index of difficulty.
+    pub fitts_b_ms: f64,
+    pub min_ms: f64,
+    pub max_ms: f64,
+    /// Lognormal spread applied to the movement time, as a fraction. 0.12
+    /// gives a coefficient of variation near 12%, which is what human
+    /// trial-to-trial variability looks like.
+    pub mt_jitter: f64,
+    /// Fraction of the distance the ballistic phase commits to. The rest is
+    /// left for the next frame's corrective submovement.
+    pub gain: f64,
+    pub gain_sd: f64,
+    /// How often a flick overshoots instead of falling short.
+    pub overshoot_p: f64,
+    /// Where peak speed sits, as a fraction of the movement time.
+    pub peak_min: f64,
+    pub peak_max: f64,
+    /// Maximum perpendicular deviation from the straight line, as a fraction
+    /// of the amplitude.
+    pub bow: f64,
+    /// How strongly the bow direction follows the direction of travel. `0` is
+    /// a coin flip, `0.5` is fully handed.
+    pub curve_bias: f64,
+    /// Skews where along the path the bow peaks.
+    pub kappa_min: f64,
+    pub kappa_max: f64,
+    /// Harris & Wolpert coefficient: noise standard deviation as a fraction of
+    /// the per-report displacement.
+    pub noise: f64,
+    /// Physiological tremor amplitude, in mouse counts. `0` disables it.
+    pub tremor: f64,
+    /// Reaction latency on a fresh acquisition. Off by default, because the
+    /// ESP trigger button already supplies a human reaction time — the command
+    /// only leaves this process while that button is held.
+    pub react_min_ms: u64,
+    pub react_max_ms: u64,
+    /// Silence longer than this means the old target is gone, so the leftover
+    /// sub-count fraction describes a move that no longer exists.
+    pub gap_ms: u64,
+    /// Ceiling on a single report, in counts. Excess is deferred to the next
+    /// report rather than dropped.
+    pub max_counts: i64,
+}
+
+impl Default for SmoothConfig {
+    fn default() -> Self {
+        Self {
+            poll_hz: 0,
+            fitts_a_ms: 35.,
+            fitts_b_ms: 55.,
+            min_ms: 45.,
+            max_ms: 320.,
+            mt_jitter: 0.12,
+            gain: 0.90,
+            gain_sd: 0.045,
+            overshoot_p: 0.15,
+            peak_min: 0.30,
+            peak_max: 0.45,
+            bow: 0.03,
+            curve_bias: 0.30,
+            kappa_min: 0.85,
+            kappa_max: 1.25,
+            noise: 0.022,
+            tremor: 0.35,
+            react_min_ms: 0,
+            react_max_ms: 0,
+            gap_ms: 250,
+            max_counts: 127,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub event_listener_port: u16,
@@ -133,6 +232,12 @@ pub struct Config {
     pub makcu_listen: bool,
     pub mouse_dpi: f64,
     pub game_sens: f64,
+    /// `MOVE_SMOOTH`: move through the human-flick model instead of the
+    /// firmware bezier in the ordinary aim modes. The ESP button 2 path uses
+    /// it whatever this says.
+    pub move_smooth: bool,
+    /// Tuning for the human-flick model; see [`SmoothConfig`].
+    pub smooth: SmoothConfig,
 
     pub esp_port: Option<String>,
     pub default_aim_mode: Option<u8>,
@@ -317,6 +422,52 @@ impl Config {
             .unwrap_or("1.".to_string())
             .parse::<f64>()
             .expect("GAME_SENS is not a number");
+        // `mouse_counts` divides by both. A zero there yields an infinite
+        // delta, and `NaN as i32` saturates to zero rather than panicking, so
+        // the failure would be a silently frozen aim instead of a crash.
+        if !(game_sens > 0.) {
+            panic!("GAME_SENS must be greater than zero");
+        }
+        if !(mouse_dpi > 0.) {
+            panic!("MOUSE_DPI must be greater than zero");
+        }
+        let move_smooth = var("MOVE_SMOOTH")
+            .unwrap_or("false".to_string())
+            .parse::<bool>()
+            .expect("MOVE_SMOOTH is not a bool");
+        let default_smooth = SmoothConfig::default();
+        let smooth_f = |name: &str, default: f64| -> f64 {
+            var(name)
+                .unwrap_or(default.to_string())
+                .parse::<f64>()
+                .unwrap_or_else(|_| panic!("{name} is not a number"))
+        };
+        let smooth_u64 = |name: &str, default: u64| -> u64 {
+            var(name)
+                .unwrap_or(default.to_string())
+                .parse::<u64>()
+                .unwrap_or_else(|_| panic!("{name} is not an integer"))
+        };
+        let smooth = SmoothConfig {
+            poll_hz: var("MOVE_SMOOTH_POLL_HZ")
+                .unwrap_or("0".to_string())
+                .parse::<u32>()
+                .expect("MOVE_SMOOTH_POLL_HZ is not a number"),
+            fitts_a_ms: smooth_f("MOVE_SMOOTH_FITTS_A_MS", default_smooth.fitts_a_ms),
+            fitts_b_ms: smooth_f("MOVE_SMOOTH_FITTS_B_MS", default_smooth.fitts_b_ms),
+            min_ms: smooth_f("MOVE_SMOOTH_MIN_MS", default_smooth.min_ms),
+            max_ms: smooth_f("MOVE_SMOOTH_MAX_MS", default_smooth.max_ms),
+            gain: smooth_f("MOVE_SMOOTH_GAIN", default_smooth.gain),
+            overshoot_p: smooth_f("MOVE_SMOOTH_OVERSHOOT_P", default_smooth.overshoot_p),
+            peak_min: smooth_f("MOVE_SMOOTH_PEAK_MIN", default_smooth.peak_min),
+            peak_max: smooth_f("MOVE_SMOOTH_PEAK_MAX", default_smooth.peak_max),
+            bow: smooth_f("MOVE_SMOOTH_BOW", default_smooth.bow),
+            noise: smooth_f("MOVE_SMOOTH_NOISE", default_smooth.noise),
+            tremor: smooth_f("MOVE_SMOOTH_TREMOR", default_smooth.tremor),
+            react_min_ms: smooth_u64("MOVE_SMOOTH_REACT_MIN_MS", default_smooth.react_min_ms),
+            react_max_ms: smooth_u64("MOVE_SMOOTH_REACT_MAX_MS", default_smooth.react_max_ms),
+            ..default_smooth
+        };
         let esp_port = var("ESP_PORT").ok();
         // Compared against `dist`, which is a frame-pixel distance because
         // `min_zone` comes straight off bbox dimensions.
@@ -381,6 +532,8 @@ impl Config {
             makcu_listen,
             mouse_dpi,
             game_sens,
+            move_smooth,
+            smooth,
             esp_port,
             fov,
             default_aim_mode,
@@ -472,6 +625,22 @@ mod tests {
                 crosshair.1 - frame_h as f32 / 2.,
             );
             assert_eq!(mouse_counts(delta, scale, 1.0, 1000.), (0., 0.));
+        }
+    }
+
+    /// A `km.move` line is about 18 bytes and 8N1 spends ten bits per byte, so
+    /// the cadence has to leave headroom even at the slowest allowed link —
+    /// otherwise one stalled write pushes every later report past its
+    /// deadline and the velocity profile smears.
+    #[test]
+    fn the_report_rate_stays_inside_the_serial_byte_budget_at_every_baud() {
+        const LINE_BYTES: f64 = 18.;
+        const BITS_PER_BYTE: f64 = 10.;
+        for (baud, expected) in [(115_200u32, 250u32), (2_000_000, 1000), (4_000_000, 1000)] {
+            let hz = poll_hz_for_baud(baud);
+            assert_eq!(hz, expected, "{baud}");
+            let duty = hz as f64 * LINE_BYTES * BITS_PER_BYTE / baud as f64;
+            assert!(duty < 0.5, "{baud} would run the link {duty:.2} busy");
         }
     }
 }

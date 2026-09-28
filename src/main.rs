@@ -6,7 +6,7 @@ use aimbot::{
     esp_button::EspButton,
     event::start_event_listener,
     model::{Bbox, Model, Point2f},
-    mouse::{MouseVirtual, SmoothAim},
+    mouse::{MouseVirtual, MoveRequest, SmoothAim, handle_mouse},
     stream::{handle_capture, open_source},
 };
 use anyhow::{Result, anyhow};
@@ -195,9 +195,34 @@ fn main() -> Result<()> {
                 mouse
             };
 
-            let mut random = rand::rng();
+            // Every mouse command leaves from one worker thread, so the aim
+            // loop never blocks on the mouse and ordering is still whatever
+            // order requests were popped in. One slot, overwritten: the worker
+            // should pick up the newest aim, not a backlog of stale ones.
             #[cfg(not(feature = "disable-mouse"))]
-            let mut smooth = SmoothAim::new(config.smooth, config.makcu_baud, config.mouse_dpi);
+            let move_queue = Arc::new(ArrayQueue::<MoveRequest>::new(1));
+            #[cfg(not(feature = "disable-mouse"))]
+            {
+                let mouse = mouse.clone();
+                let side4 = mouse.clone();
+                let queue = move_queue.clone();
+                let smooth =
+                    SmoothAim::new(config.smooth, config.makcu_baud, config.mouse_dpi);
+                let trigger = trigger.clone();
+                let button1 = esp_button1.clone();
+                let button2 = esp_button2.clone();
+                thread::spawn(move || {
+                    handle_mouse(mouse, queue, smooth, move || {
+                        let use_trigger = trigger.load(Ordering::Acquire);
+                        !use_trigger
+                            || button1.load(Ordering::Acquire)
+                            || button2.load(Ordering::Acquire)
+                            || side4.is_side4_pressing()
+                    });
+                });
+            }
+
+            let mut random = rand::rng();
             // Fitts measures *visual* difficulty, so it wants screen pixels,
             // while `dist` and `min_zone` are frame pixels. The two coincide
             // only when the capture matches the screen.
@@ -253,34 +278,26 @@ fn main() -> Result<()> {
                                 // hand; the ordinary modes do when MOVE_SMOOTH
                                 // is on.
                                 let use_smooth = esp_button2_pressed || config.move_smooth;
-                                if fire && use_smooth {
-                                    // Blocks this thread for the length of the
-                                    // flick, so at most one is ever in flight.
-                                    // It does not make the next frame current:
-                                    // a frame shows the game as it was a
-                                    // capture latency ago, so a flick shorter
-                                    // than that latency can be commanded twice.
-                                    mouse.move_smooth(
-                                        &mut smooth,
-                                        (dx, dy),
-                                        dist * px_scale,
-                                        // Fitts's W is the target's full
-                                        // width; `min_zone` is the radius the
-                                        // aim is allowed to land inside, so it
-                                        // doubles. Passing the radius would
-                                        // add a whole bit of difficulty and
-                                        // make every flick a slope longer.
-                                        2. * min_zone * px_scale,
-                                        &mut random,
-                                        || {
-                                            let t = trigger.load(Ordering::Acquire);
-                                            !t || esp_button1.load(Ordering::Acquire)
-                                                || esp_button2_pressed
-                                                || mouse.is_side4_pressing()
-                                        },
-                                    )?;
-                                } else if fire {
-                                    mouse.move_bezier(dx, dy, &mut random)?;
+                                if fire {
+                                    // Overwrites whatever the worker has not
+                                    // started yet. A queued aim describes where
+                                    // the target was a frame ago, so the newest
+                                    // one is the only one worth playing.
+                                    move_queue.force_push(if use_smooth {
+                                        MoveRequest::Smooth {
+                                            delta: (dx, dy),
+                                            reach_px: dist * px_scale,
+                                            // Fitts's W is the target's full
+                                            // width; `min_zone` is the radius
+                                            // the aim may land inside, so it
+                                            // doubles. Passing the radius would
+                                            // add a whole bit of difficulty and
+                                            // make every flick a slope longer.
+                                            width_px: 2. * min_zone * px_scale,
+                                        }
+                                    } else {
+                                        MoveRequest::Bezier { delta: (dx, dy) }
+                                    });
                                 }
                             }
 

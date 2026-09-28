@@ -128,6 +128,27 @@ pub struct SmoothConfig {
     /// Ceiling on a single report, in counts. Excess is deferred to the next
     /// report rather than dropped.
     pub max_counts: i64,
+    /// Fire a left click once the flick has settled.
+    ///
+    /// Only the `move_smooth` path does this. It fires after *every* flick, and
+    /// `move_smooth` is called once per frame while the trigger is held, so a
+    /// held trigger produces a click roughly every
+    /// `auto_click_lower_ms + hold` — a few per second, not one per target.
+    pub auto_click: bool,
+    /// Delay between the flick ending and the click, in milliseconds, drawn
+    /// uniformly. Stands in for the gap between settling on a target and
+    /// deciding to shoot, so it should not be zero.
+    pub auto_click_lower_ms: u64,
+    pub auto_click_upper_ms: u64,
+    /// Smallest gap between two clicks, in milliseconds. `0` disables the
+    /// limit.
+    ///
+    /// Without it a held trigger clicks once per flick, and a flick is planned
+    /// once per frame, so the rate is whatever the frame rate and the click
+    /// delay happen to multiply out to. A limited click is skipped outright
+    /// rather than deferred: the worker does not even wait out the delay, so
+    /// the aim keeps tracking instead of stalling on a click it will not fire.
+    pub auto_click_rate_limit_ms: u64,
     /// Hand-speed envelope, in inches per second of physical mouse travel.
     ///
     /// Fitts's index of difficulty is a *ratio* of distance to target width, so
@@ -206,6 +227,10 @@ impl Default for SmoothConfig {
             gap_ms: 250,
             max_counts: 127,
             move_now: false,
+            auto_click: false,
+            auto_click_lower_ms: 100,
+            auto_click_upper_ms: 130,
+            auto_click_rate_limit_ms: 0,
             counts_per_report: 2.0,
             // A slow deliberate correction and a hard flick, respectively.
             min_speed_ips: 0.6,
@@ -526,6 +551,22 @@ impl Config {
                 .unwrap_or(default_smooth.move_now.to_string())
                 .parse::<bool>()
                 .expect("MOVE_SMOOTH_MOVE_NOW is not a bool"),
+            auto_click: var("MOVE_SMOOTH_AUTO_CLICK")
+                .unwrap_or(default_smooth.auto_click.to_string())
+                .parse::<bool>()
+                .expect("MOVE_SMOOTH_AUTO_CLICK is not a bool"),
+            auto_click_lower_ms: smooth_u64(
+                "MOVE_SMOOTH_AUTO_CLICK_LOWER_MS",
+                default_smooth.auto_click_lower_ms,
+            ),
+            auto_click_upper_ms: smooth_u64(
+                "MOVE_SMOOTH_AUTO_CLICK_UPPER_MS",
+                default_smooth.auto_click_upper_ms,
+            ),
+            auto_click_rate_limit_ms: smooth_u64(
+                "MOVE_SMOOTH_AUTO_CLICK_RATE_LIMIT",
+                default_smooth.auto_click_rate_limit_ms,
+            ),
             min_speed_ips: smooth_f("MOVE_SMOOTH_MIN_SPEED_IPS", default_smooth.min_speed_ips),
             max_speed_ips: smooth_f("MOVE_SMOOTH_MAX_SPEED_IPS", default_smooth.max_speed_ips),
             counts_per_report: smooth_f(

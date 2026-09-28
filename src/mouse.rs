@@ -1,5 +1,6 @@
 use crate::config::{SmoothConfig, poll_hz_for_baud};
 use anyhow::{Result, bail};
+use crossbeam::queue::ArrayQueue;
 use rand::prelude::*;
 use serialport::{self, SerialPort, available_ports};
 use std::io::Write;
@@ -21,6 +22,14 @@ const CRLF: &str = "\r\n";
 /// `thread::sleep` on Linux overshoots by tens of microseconds, so below this
 /// it is cheaper to fire a report a touch early than to oversleep it.
 const SLEEP_FLOOR: Duration = Duration::from_micros(150);
+/// How long a click holds the button down, in milliseconds. The range MAKCU's
+/// own `km.click` draws from by default, which is as good a reference as any
+/// for what a click should look like on the wire.
+const CLICK_HOLD_MS: (u64, u64) = (35, 75);
+/// How long [`handle_mouse`] parks when the queue is empty. A single command
+/// already costs ~0.6 ms over usbip, so a wake-up granularity well inside that
+/// is not what limits this.
+const IDLE_POLL: Duration = Duration::from_micros(200);
 
 pub struct MouseVirtual {
     serial: Mutex<Box<dyn SerialPort>>,
@@ -198,26 +207,57 @@ impl MouseVirtual {
         random: &mut impl Rng,
         keep_going: impl Fn() -> bool,
     ) -> Result<()> {
-        match plan_flick(smooth, delta, reach_px, width_px, random) {
-            Some(flick) => {
-                // The count budget is what decides whether this still looks
-                // like a hand: below roughly one count per report the profile
-                // degenerates into isolated ticks, and the only cure is a
-                // calibration that yields more counts per pixel.
-                tracing::debug!(
-                    "[Smooth] {:.2} counts over {} reports in {:?} ({:.2}/report), \
-                     reach {:.0} px, width {:.0} px",
-                    delta.0.hypot(delta.1),
-                    flick.steps.len(),
-                    flick.duration,
-                    delta.0.hypot(delta.1) / flick.steps.len() as f64,
-                    reach_px,
-                    width_px,
-                );
-                self.play_flick(&flick, keep_going)
-            }
-            None => Ok(()),
+        let Some(flick) = plan_flick(smooth, delta, reach_px, width_px, random) else {
+            return Ok(());
+        };
+        // The count budget is what decides whether this still looks like a
+        // hand: below roughly one count per report the profile degenerates into
+        // isolated ticks.
+        tracing::debug!(
+            "[Smooth] {:.2} counts over {} reports in {:?} ({:.2}/report), \
+             reach {:.0} px, width {:.0} px",
+            delta.0.hypot(delta.1),
+            flick.steps.len(),
+            flick.duration,
+            delta.0.hypot(delta.1) / flick.steps.len() as f64,
+            reach_px,
+            width_px,
+        );
+        self.play_flick(&flick, &keep_going)?;
+
+        let cfg = smooth.config();
+        // A flick that was abandoned half way was abandoned for a reason, so
+        // there is nothing to shoot at.
+        if !cfg.auto_click || !keep_going() {
+            return Ok(());
         }
+        let wait = auto_click_delay(cfg.auto_click_lower_ms, cfg.auto_click_upper_ms, random);
+        // Checked before the wait, not after: a click this would refuse is
+        // skipped outright, so the worker goes straight back to tracking
+        // instead of sleeping out a delay it will not use.
+        if !click_allowed(
+            smooth.last_click,
+            Instant::now(),
+            wait,
+            cfg.auto_click_rate_limit_ms,
+        ) {
+            return Ok(());
+        }
+        sleep(wait);
+        // Re-read the trigger: the wait is long enough that it can be let go
+        // inside it, and firing after that is a shot nobody asked for.
+        if !keep_going() {
+            return Ok(());
+        }
+        tracing::debug!("[Smooth] auto click after {:?}", wait);
+        // Stamped at the press, not after the release: the limit is a gap
+        // between clicks, and `click_left` holds the button for tens of
+        // milliseconds. Stamping afterwards would quietly add that hold to
+        // every gap.
+        let pressed_at = Instant::now();
+        self.click_left(random)?;
+        smooth.last_click = Some(pressed_at);
+        Ok(())
     }
 
     /// Play a flick planned by [`plan_flick`], one `km.move` per report
@@ -442,12 +482,30 @@ impl MouseVirtual {
         self.cmd("km.lock_my(0)")
     }
 
-    pub fn click_left(&self) -> Result<()> {
-        self.cmd(format!("km.left(1){CRLF}km.left(0)").as_str())
+    /// Press a button, hold it long enough to be seen, release it.
+    ///
+    /// `km.left(1)` immediately followed by `km.left(0)` — which is what this
+    /// used to send, both in one write — does not click. The firmware emits HID
+    /// reports on a fixed cadence, so a press and release that both land inside
+    /// one report interval never appear on the wire at all; at 4 Mbaud the two
+    /// lines are tens of microseconds apart.
+    ///
+    /// MAKCU's own `km.click(button)` would time the hold in firmware, but this
+    /// firmware does not have it: it answers `km.click` with the same silence
+    /// it gives any unknown command, so the hold is timed here instead.
+    fn click_button(&self, button: &str, random: &mut impl Rng) -> Result<()> {
+        let hold = random.random_range(CLICK_HOLD_MS.0..=CLICK_HOLD_MS.1);
+        self.cmd(format!("km.{button}(1)").as_str())?;
+        sleep(Duration::from_millis(hold));
+        self.cmd(format!("km.{button}(0)").as_str())
     }
 
-    pub fn click_right(&self) -> Result<()> {
-        self.cmd(format!("km.right(1){CRLF}km.right(0)").as_str())
+    pub fn click_left(&self, random: &mut impl Rng) -> Result<()> {
+        self.click_button("left", random)
+    }
+
+    pub fn click_right(&self, random: &mut impl Rng) -> Result<()> {
+        self.click_button("right", random)
     }
 
     pub fn batch(&self) -> BatchCommands<'_> {
@@ -503,17 +561,10 @@ impl<'a> BatchCommands<'a> {
         self
     }
 
-    pub fn click_left(mut self) -> Self {
-        self.buf
-            .push_str(format!("km.left(1){CRLF}km.left(0){CRLF}").as_str());
-        self
-    }
-
-    pub fn click_right(mut self) -> Self {
-        self.buf
-            .push_str(format!("km.right(1){CRLF}km.right(0){CRLF}").as_str());
-        self
-    }
+    // No `click_*` here on purpose. A batch is one write, so a press and its
+    // release would leave in the same breath and the click would never reach
+    // the wire — see `MouseVirtual::click_button`. A click needs a hold, and a
+    // hold needs the caller to wait.
 
     pub fn run(&self) -> Result<()> {
         self.mouse.cmd(self.buf.as_str())
@@ -562,6 +613,8 @@ pub struct SmoothAim {
     last_flick: Option<Instant>,
     /// No flick before this instant; a fresh acquisition sets it.
     ready_at: Option<Instant>,
+    /// When the auto click last fired, for the rate limit.
+    last_click: Option<Instant>,
     /// Reused between flicks so the steady state does not allocate.
     weights: Vec<f64>,
 }
@@ -582,12 +635,17 @@ impl SmoothAim {
             carry: (0., 0.),
             last_flick: None,
             ready_at: None,
+            last_click: None,
             weights: Vec::new(),
         }
     }
 
     pub fn poll_hz(&self) -> u32 {
         self.poll_hz
+    }
+
+    pub fn config(&self) -> &SmoothConfig {
+        &self.cfg
     }
 
     #[cfg(test)]
@@ -657,6 +715,96 @@ fn render_weights(out: &mut Vec<f64>, mt_ms: f64, peak_frac: f64, n: usize) {
     for w in out.iter_mut() {
         *w /= sum;
     }
+}
+
+/// What the aim loop asks the mouse thread to do.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MoveRequest {
+    /// Play the human-flick model, and the auto click behind it if configured.
+    Smooth {
+        delta: (f64, f64),
+        /// Reach and target width in *screen* pixels; Fitts wants the visual
+        /// difficulty of the shot, which counts do not carry.
+        reach_px: f32,
+        width_px: f32,
+    },
+    /// Hand the whole delta to the firmware in one command.
+    Bezier { delta: (f64, f64) },
+}
+
+/// Drain `queue` and drive the mouse, forever.
+///
+/// The aim loop used to call `move_smooth` directly, which blocks for the
+/// length of the flick and, with the auto click on, for the click behind it. A
+/// frame arriving mid-flick therefore went unlooked-at until the mouse had
+/// finished — up to a couple of hundred milliseconds of not detecting anything.
+///
+/// Moving off-thread costs no ordering. Every command still leaves from this
+/// one thread in the order it pops them, and a request's click still follows
+/// its own move because one iteration does both, in sequence. What it does
+/// change is that the queue holds a single request which the aim loop
+/// overwrites, so the worker always picks up the newest aim rather than
+/// working through a backlog of places the target used to be.
+pub fn handle_mouse(
+    mouse: Arc<MouseVirtual>,
+    queue: Arc<ArrayQueue<MoveRequest>>,
+    mut smooth: SmoothAim,
+    keep_going: impl Fn() -> bool,
+) {
+    let mut random = rand::rng();
+    loop {
+        let Some(request) = queue.pop() else {
+            sleep(IDLE_POLL);
+            continue;
+        };
+        let result = match request {
+            MoveRequest::Smooth {
+                delta,
+                reach_px,
+                width_px,
+            } => mouse.move_smooth(
+                &mut smooth,
+                delta,
+                reach_px,
+                width_px,
+                &mut random,
+                &keep_going,
+            ),
+            MoveRequest::Bezier { delta } => mouse.move_bezier(delta.0, delta.1, &mut random),
+        };
+        // A failed command is one lost aim, not a reason to stop aiming: the
+        // next frame plans afresh from wherever the crosshair actually is.
+        if let Err(e) = result {
+            tracing::error!("[Mouse] {}", e);
+        }
+    }
+}
+
+/// May a click land at `now + wait`, given the last one was at `last`?
+///
+/// The projected instant is what is checked rather than the current one, so
+/// the gap the configuration asks for is the gap between clicks rather than
+/// between a click and the flick before the next one. A `limit_ms` of zero is
+/// no limit.
+pub fn click_allowed(last: Option<Instant>, now: Instant, wait: Duration, limit_ms: u64) -> bool {
+    match (last, limit_ms) {
+        (_, 0) | (None, _) => true,
+        (Some(last), ms) => now + wait >= last + Duration::from_millis(ms),
+    }
+}
+
+/// How long to wait between a flick settling and the click that follows it.
+///
+/// Tolerant of the bounds arriving collapsed or the wrong way round, because
+/// they come straight from the environment and `random_range` panics on an
+/// empty range — the bug commit 996fcf9 had to go back and fix.
+pub fn auto_click_delay(lower_ms: u64, upper_ms: u64, random: &mut impl Rng) -> Duration {
+    let (lo, hi) = (lower_ms.min(upper_ms), lower_ms.max(upper_ms));
+    Duration::from_millis(if hi > lo {
+        random.random_range(lo..=hi)
+    } else {
+        lo
+    })
 }
 
 /// One standard normal from two uniforms (Box-Muller). `rand` carries no
@@ -1554,5 +1702,141 @@ mod tests {
             (lo - hi).abs() < 0.25 * lo.max(hi),
             "same movement took {lo:.1} ms at 400 dpi and {hi:.1} ms at 1600 dpi"
         );
+    }
+
+    #[test]
+    fn the_auto_click_delay_stays_inside_the_configured_window() {
+        let mut r = StdRng::seed_from_u64(31);
+        let (mut lo_seen, mut hi_seen) = (u64::MAX, 0u64);
+        for _ in 0..2000 {
+            let ms = auto_click_delay(100, 130, &mut r).as_millis() as u64;
+            assert!((100..=130).contains(&ms), "{ms} ms");
+            lo_seen = lo_seen.min(ms);
+            hi_seen = hi_seen.max(ms);
+        }
+        // A window that is never actually explored is a constant wearing a
+        // range's clothes.
+        assert!(lo_seen < 105 && hi_seen > 125, "spanned {lo_seen}..{hi_seen}");
+    }
+
+    /// The bounds come from the environment, so every degenerate shape has to
+    /// survive: `random_range` panics on an empty range.
+    #[test]
+    fn a_degenerate_auto_click_window_does_not_panic() {
+        let mut r = StdRng::seed_from_u64(32);
+        assert_eq!(auto_click_delay(120, 120, &mut r), Duration::from_millis(120));
+        // Inverted: read as the window it obviously means.
+        for _ in 0..200 {
+            let ms = auto_click_delay(130, 100, &mut r).as_millis() as u64;
+            assert!((100..=130).contains(&ms), "{ms} ms");
+        }
+        assert_eq!(auto_click_delay(0, 0, &mut r), Duration::ZERO);
+    }
+
+    #[test]
+    fn auto_click_is_off_unless_it_is_asked_for() {
+        let c = cfg();
+        assert!(!c.auto_click);
+        assert_eq!((c.auto_click_lower_ms, c.auto_click_upper_ms), (100, 130));
+    }
+
+    /// `0` is the documented way to switch the limit off, and it has to mean
+    /// exactly that rather than "no gap at all, which happens to allow
+    /// everything" — the two are only the same until someone reorders the
+    /// check.
+    #[test]
+    fn a_zero_rate_limit_allows_every_click() {
+        let t = Instant::now();
+        for elapsed in [0u64, 1, 50, 5_000] {
+            assert!(click_allowed(
+                Some(t),
+                t + Duration::from_millis(elapsed),
+                Duration::ZERO,
+                0
+            ));
+        }
+    }
+
+    #[test]
+    fn the_first_click_is_never_rate_limited() {
+        assert!(click_allowed(None, Instant::now(), Duration::ZERO, 10_000));
+    }
+
+    /// The gap the limit promises is click-to-click, so the delay that runs
+    /// before the click counts toward it. Measuring from the flick instead
+    /// would make the real gap longer than configured by that delay.
+    #[test]
+    fn the_rate_limit_measures_to_the_click_not_to_the_flick() {
+        let last = Instant::now();
+        let now = last + Duration::from_millis(400);
+        let wait = Duration::from_millis(120);
+        // 400 + 120 = 520 >= 500, so this one lands late enough...
+        assert!(click_allowed(Some(last), now, wait, 500));
+        // ...and without counting the delay it would have been refused.
+        assert!(!click_allowed(Some(last), now, Duration::ZERO, 500));
+        // Comfortably inside the window either way.
+        assert!(!click_allowed(Some(last), now, wait, 1_000));
+    }
+
+    /// A limit shorter than the click cadence must not quietly throttle.
+    #[test]
+    fn a_limit_below_the_natural_cadence_changes_nothing() {
+        let last = Instant::now();
+        let now = last + Duration::from_millis(200);
+        assert!(click_allowed(Some(last), now, Duration::from_millis(100), 150));
+    }
+
+    /// A limit of N milliseconds has to produce a gap of N milliseconds
+    /// between clicks — press to press, which is what a fire rate means.
+    ///
+    /// Replays a worker: flick, then either wait out the delay and click, or
+    /// be refused and go straight on to the next frame.
+    #[test]
+    fn the_rate_limit_produces_the_gap_it_promises() {
+        let mut r = StdRng::seed_from_u64(7);
+        let base = Instant::now();
+        for limit in [250u64, 500, 1000, 2000] {
+            let (mut last, mut presses, mut t) = (None, Vec::new(), 0u64);
+            while t < 10_000 {
+                t += 5; // the flick
+                let wait = auto_click_delay(100, 130, &mut r);
+                let now = base + Duration::from_millis(t);
+                if click_allowed(last, now, wait, limit) {
+                    let press = now + wait;
+                    presses.push(press);
+                    last = Some(press);
+                    t += wait.as_millis() as u64 + 55; // the delay, then the hold
+                } else {
+                    t += 7; // refused: straight back to tracking, no sleep
+                }
+            }
+            assert!(presses.len() > 2, "{limit}: only {} clicks", presses.len());
+            for pair in presses.windows(2) {
+                let gap = pair[1] - pair[0];
+                assert!(gap >= Duration::from_millis(limit), "{limit}: {gap:?}");
+                // Overshooting is throttling harder than asked. The slack is
+                // one worker cycle, because that is how often it can look.
+                assert!(gap <= Duration::from_millis(limit + 40), "{limit}: {gap:?}");
+            }
+        }
+    }
+
+    /// With the limit off the click rate is whatever the cycle costs, and the
+    /// cycle is dominated by the delay plus the hold rather than the flick.
+    #[test]
+    fn an_unlimited_click_fires_about_six_times_a_second() {
+        let mut r = StdRng::seed_from_u64(7);
+        let base = Instant::now();
+        let (mut last, mut clicks, mut t) = (None, 0u32, 0u64);
+        while t < 10_000 {
+            t += 5;
+            let wait = auto_click_delay(100, 130, &mut r);
+            assert!(click_allowed(last, base + Duration::from_millis(t), wait, 0));
+            let press = base + Duration::from_millis(t) + wait;
+            last = Some(press);
+            clicks += 1;
+            t += wait.as_millis() as u64 + 55;
+        }
+        assert!((5..=7).contains(&clicks.div_ceil(10)), "{clicks} clicks in 10 s");
     }
 }

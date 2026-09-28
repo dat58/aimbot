@@ -128,6 +128,57 @@ pub struct SmoothConfig {
     /// Ceiling on a single report, in counts. Excess is deferred to the next
     /// report rather than dropped.
     pub max_counts: i64,
+    /// Hand-speed envelope, in inches per second of physical mouse travel.
+    ///
+    /// Fitts's index of difficulty is a *ratio* of distance to target width, so
+    /// it is dimensionless and says nothing about how far the hand actually
+    /// moves. Counts do: `counts / MOUSE_DPI` is inches. Without this bound the
+    /// same 250 ms stroke is asked of 500 counts and of 5, and the second one
+    /// implies a hand creeping at hundredths of an inch per second — a
+    /// deliberate crawl, not an aim, and the reason this visibly failed to move
+    /// at a low counts-per-pixel.
+    ///
+    /// `min_speed_ips` is not merely a rail: below a few hundred counts it is
+    /// what actually sets the duration, and Fitts takes over above that. This
+    /// is the right way round. Fitts describes *aimed* reaches, where landing
+    /// accurately is the cost; a correction far too small for that just travels
+    /// at the hand's comfortable speed, which makes its duration proportional
+    /// to its length. Fitts's law is known to flatten out at very low indices
+    /// of difficulty for the same reason.
+    ///
+    /// Expressing both in inches rather than counts is what makes them hold at
+    /// any `MOUSE_DPI` and `GAME_SENS`, instead of needing a retune whenever
+    /// the counts-per-pixel changes — which is not a tuning knob but a fact
+    /// about the mouse and the game.
+    pub min_speed_ips: f64,
+    pub max_speed_ips: f64,
+    /// Send each report as `km.move_now` instead of `km.move`.
+    ///
+    /// MAKCU firmware V4.028+ interpolates a plain `km.move` internally, over
+    /// roughly 4-42 ms depending on magnitude. This driver does its own
+    /// interpolation and times every report itself, so that second layer only
+    /// smears the profile and lets commands queue up behind each other.
+    /// `km.move_now` puts the counts in the next report untouched, which is
+    /// what a per-report driver wants.
+    ///
+    /// Off by default because the command does not exist on older firmware,
+    /// where enabling it would stop the mouse moving at all.
+    pub move_now: bool,
+    /// Mean counts a report should carry, which sets how many reports a stroke
+    /// of a given amplitude is worth planning.
+    ///
+    /// Reports are the resolution limit of the whole model: counts are
+    /// integers, so a report holding less than half a count rounds to zero and
+    /// moves nothing. Fitts's law sizes a stroke in *time*, and at 1 kHz a
+    /// 250 ms stroke is 250 reports — fine for the hundreds of counts a
+    /// full-screen flick carries, useless for the handful of counts an
+    /// in-region correction carries, where it leaves 98% of the reports empty
+    /// and the mouse visibly crawling.
+    ///
+    /// A real mouse mid-flick reports tens of counts at a time, so anything at
+    /// or above ~1 keeps every report doing work. Raise it for fewer, larger
+    /// reports; below 1 the zero-report problem starts to come back.
+    pub counts_per_report: f64,
 }
 
 impl Default for SmoothConfig {
@@ -154,6 +205,11 @@ impl Default for SmoothConfig {
             react_max_ms: 0,
             gap_ms: 250,
             max_counts: 127,
+            move_now: false,
+            counts_per_report: 2.0,
+            // A slow deliberate correction and a hard flick, respectively.
+            min_speed_ips: 0.6,
+            max_speed_ips: 40.0,
         }
     }
 }
@@ -466,6 +522,16 @@ impl Config {
             tremor: smooth_f("MOVE_SMOOTH_TREMOR", default_smooth.tremor),
             react_min_ms: smooth_u64("MOVE_SMOOTH_REACT_MIN_MS", default_smooth.react_min_ms),
             react_max_ms: smooth_u64("MOVE_SMOOTH_REACT_MAX_MS", default_smooth.react_max_ms),
+            move_now: var("MOVE_SMOOTH_MOVE_NOW")
+                .unwrap_or(default_smooth.move_now.to_string())
+                .parse::<bool>()
+                .expect("MOVE_SMOOTH_MOVE_NOW is not a bool"),
+            min_speed_ips: smooth_f("MOVE_SMOOTH_MIN_SPEED_IPS", default_smooth.min_speed_ips),
+            max_speed_ips: smooth_f("MOVE_SMOOTH_MAX_SPEED_IPS", default_smooth.max_speed_ips),
+            counts_per_report: smooth_f(
+                "MOVE_SMOOTH_COUNTS_PER_REPORT",
+                default_smooth.counts_per_report,
+            ),
             ..default_smooth
         };
         let esp_port = var("ESP_PORT").ok();

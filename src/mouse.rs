@@ -25,6 +25,11 @@ const SLEEP_FLOOR: Duration = Duration::from_micros(150);
 pub struct MouseVirtual {
     serial: Mutex<Box<dyn SerialPort>>,
     pressed: [AtomicBool; 5],
+    /// Whether this firmware answers `km.move_now`. Probed once at connect,
+    /// because an unknown command is answered with silence rather than an
+    /// error: asking for `move_now` on firmware without it would swallow every
+    /// report and stop the mouse dead with nothing in the log to say why.
+    move_now: AtomicBool,
 }
 
 impl MouseVirtual {
@@ -36,7 +41,7 @@ impl MouseVirtual {
         let mut serial = serialport::new(port, baud)
             .timeout(Duration::from_millis(300))
             .open()?;
-        let serial = match Self::check_km_version_ok(&mut serial) {
+        let mut serial = match Self::check_km_version_ok(&mut serial) {
             Ok(_) => {
                 drop(serial);
                 sleep(Duration::from_millis(300));
@@ -79,10 +84,50 @@ impl MouseVirtual {
             }
         };
         tracing::info!("Mouse connected at baud rate: {:?}", serial.baud_rate());
+        let move_now = Self::probe_move_now(&mut serial);
+        if move_now {
+            tracing::info!("Firmware supports km.move_now");
+        } else {
+            tracing::info!(
+                "Firmware has no km.move_now; MOVE_SMOOTH_MOVE_NOW falls back to km.move"
+            );
+        }
         Ok(Self {
             serial: Mutex::new(serial),
             pressed: Default::default(),
+            move_now: AtomicBool::new(move_now),
         })
+    }
+
+    /// Does this firmware know `km.move_now`?
+    ///
+    /// A zero-count move is a no-op whichever way it goes, so the probe cannot
+    /// disturb the pointer. A known command is echoed back; an unknown one gets
+    /// no reply at all, which is what makes the distinction observable.
+    fn probe_move_now(serial: &mut Box<dyn SerialPort>) -> bool {
+        let _ = serial.clear(serialport::ClearBuffer::Input);
+        if serial.write_all(b"km.move_now(0,0)\r\n").is_err() {
+            return false;
+        }
+        // Button reports may already be streaming, so scan for the echo rather
+        // than expecting it to be the whole of the reply.
+        let deadline = Instant::now() + Duration::from_millis(250);
+        let mut seen = String::new();
+        let mut buffer = [0u8; 128];
+        while Instant::now() < deadline {
+            match serial.read(&mut buffer) {
+                Ok(0) => {}
+                Ok(n) => {
+                    seen.push_str(&String::from_utf8_lossy(&buffer[..n]));
+                    if seen.contains("move_now") {
+                        return true;
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(_) => return false,
+            }
+        }
+        false
     }
 
     fn check_km_version_ok(serial: &mut Box<dyn SerialPort>) -> Result<()> {
@@ -154,7 +199,23 @@ impl MouseVirtual {
         keep_going: impl Fn() -> bool,
     ) -> Result<()> {
         match plan_flick(smooth, delta, reach_px, width_px, random) {
-            Some(flick) => self.play_flick(&flick, keep_going),
+            Some(flick) => {
+                // The count budget is what decides whether this still looks
+                // like a hand: below roughly one count per report the profile
+                // degenerates into isolated ticks, and the only cure is a
+                // calibration that yields more counts per pixel.
+                tracing::debug!(
+                    "[Smooth] {:.2} counts over {} reports in {:?} ({:.2}/report), \
+                     reach {:.0} px, width {:.0} px",
+                    delta.0.hypot(delta.1),
+                    flick.steps.len(),
+                    flick.duration,
+                    delta.0.hypot(delta.1) / flick.steps.len() as f64,
+                    reach_px,
+                    width_px,
+                );
+                self.play_flick(&flick, keep_going)
+            }
             None => Ok(()),
         }
     }
@@ -171,6 +232,14 @@ impl MouseVirtual {
     /// re-reading the trigger for the length of the movement. A hand abandons a
     /// flick when the reason for it goes away, so this does too.
     pub fn play_flick(&self, flick: &Flick, keep_going: impl Fn() -> bool) -> Result<()> {
+        // `km.move` is interpolated by V4.028+ firmware over 4-42 ms. Every
+        // report here is already placed on its own deadline, so that second
+        // layer would smear the profile and queue commands behind each other.
+        let verb = if flick.move_now && self.move_now.load(Ordering::Acquire) {
+            "km.move_now"
+        } else {
+            "km.move"
+        };
         let start = Instant::now();
         let last = flick.steps.len().saturating_sub(1);
         let (mut dx, mut dy) = (0i64, 0i64);
@@ -193,7 +262,7 @@ impl MouseVirtual {
             // elsewhere. The deadline was still honoured, so the slow head and
             // the long tail of the profile keep their shape.
             if (dx, dy) != (0, 0) {
-                self.cmd(format!("km.move({dx},{dy})").as_str())?;
+                self.cmd(format!("{verb}({dx},{dy})").as_str())?;
                 dx = 0;
                 dy = 0;
             }
@@ -468,6 +537,9 @@ pub struct MoveStep {
 #[derive(Debug, Clone)]
 pub struct Flick {
     pub steps: Vec<MoveStep>,
+    /// Emit `km.move_now` rather than `km.move`; see
+    /// [`crate::config::SmoothConfig::move_now`].
+    pub move_now: bool,
     /// What this flick actually commits to, already cut by the ballistic gain.
     /// This is deliberately *not* the delta that was asked for.
     pub total: (i32, i32),
@@ -479,6 +551,9 @@ pub struct Flick {
 pub struct SmoothAim {
     cfg: SmoothConfig,
     poll_hz: u32,
+    /// Counts per inch of physical travel, so a stroke's amplitude can be
+    /// turned into a hand speed and checked against something physical.
+    dpi: f64,
     /// Counts asked for but not yet emitted. Under half a count unless a
     /// report hit the per-report ceiling, in which case it holds the deferred
     /// excess.
@@ -492,7 +567,7 @@ pub struct SmoothAim {
 }
 
 impl SmoothAim {
-    pub fn new(cfg: SmoothConfig, baud: u32) -> Self {
+    pub fn new(cfg: SmoothConfig, baud: u32, dpi: f64) -> Self {
         let poll_hz = if cfg.poll_hz > 0 {
             cfg.poll_hz
         } else {
@@ -501,6 +576,9 @@ impl SmoothAim {
         Self {
             cfg,
             poll_hz: poll_hz.clamp(1, 8000),
+            // A non-positive DPI would make every speed infinite; fall back to
+            // the value MOUSE_DPI defaults to rather than poisoning the plan.
+            dpi: if dpi.is_finite() && dpi > 0. { dpi } else { 1000. },
             carry: (0., 0.),
             last_flick: None,
             ready_at: None,
@@ -730,8 +808,36 @@ pub fn plan_flick_at(
         cfg.min_ms.max(cfg.max_ms).max(1.),
     );
 
+    // Fitts's index of difficulty is a ratio, so it is the same for a stroke
+    // of 5 counts and one of 5000 and says nothing about how far the hand
+    // travels. Counts do: `amp / dpi` is inches. Asking 13 counts to take the
+    // 230 ms Fitts wants implies a hand creeping at 0.06 in/s, which is a
+    // deliberate crawl rather than an aim — and is exactly what made this
+    // visibly fail to move. Bounding the implied speed in inches is what keeps
+    // this right at any MOUSE_DPI or GAME_SENS instead of per-config tuning.
+    let inches = amp / state.dpi;
+    let fastest = inches / cfg.max_speed_ips.max(1e-6) * 1000.;
+    let slowest = inches / cfg.min_speed_ips.max(1e-6) * 1000.;
+    let mt = mt.clamp(fastest.min(slowest), fastest.max(slowest)).max(0.05);
+
     let poll_hz = state.poll_hz;
-    let n = ((mt * poll_hz as f64 / 1000.).round() as i64).clamp(2, 512) as usize;
+    // Counts are integers, so a stroke has only `amp` of them to hand out:
+    // planning more reports than that leaves most rounding to zero, which is
+    // the other half of the same failure. The report budget and the poll rate
+    // are both ceilings, and whichever binds is the honest one.
+    let by_time = mt * poll_hz as f64 / 1000.;
+    let by_counts = amp / cfg.counts_per_report.max(0.05);
+    let n = (by_time.min(by_counts).round() as i64).clamp(2, 512) as usize;
+
+    // Reports are spread across the stroke rather than packed at the poll rate.
+    // Packing them would make the duration the report count over the poll rate,
+    // which is linear in amplitude — the straight duration-versus-distance band
+    // that is the machine tell this whole model exists to avoid. Spreading
+    // keeps the duration Fitts-governed and simply reports less often, which is
+    // what a real mouse does when it is moving slowly anyway: the reports it
+    // sends in between carry no motion, and `play_flick` already omits those.
+    let period = (mt / n as f64).max(1000. / poll_hz as f64);
+    let mt_eff = period * n as f64;
 
     let peak = uniform(
         random,
@@ -739,7 +845,7 @@ pub fn plan_flick_at(
         cfg.peak_min.max(cfg.peak_max),
     );
     let mut weights = std::mem::take(&mut state.weights);
-    render_weights(&mut weights, mt, peak, n);
+    render_weights(&mut weights, mt_eff, peak, n);
 
     // A single progress parameter drives both axes, so x and y stay on one
     // path. Smoothing them independently gives an L-shaped trajectory that no
@@ -763,7 +869,7 @@ pub fn plan_flick_at(
         cfg.kappa_min.max(cfg.kappa_max),
     )
     .max(0.1);
-    let tremor = Tremor::new(&cfg, mt, random);
+    let tremor = Tremor::new(&cfg, mt_eff, random);
 
     let max_counts = cfg.max_counts.clamp(1, i32::MAX as i64);
     let mut steps = Vec::with_capacity(n);
@@ -804,7 +910,7 @@ pub fn plan_flick_at(
         steps.push(MoveStep {
             dx: sx as i32,
             dy: sy as i32,
-            at: Duration::from_nanos(((k as u64 + 1) * 1_000_000_000) / poll_hz as u64),
+            at: Duration::from_nanos(((k + 1) as f64 * period * 1_000_000.) as u64),
         });
     }
 
@@ -818,6 +924,7 @@ pub fn plan_flick_at(
     let clamp32 = |v: i64| v.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
     Some(Flick {
         steps,
+        move_now: cfg.move_now,
         total: (clamp32(ex), clamp32(ey)),
         duration,
     })
@@ -835,7 +942,7 @@ mod tests {
 
     /// One flick from a fresh hand, so the sub-count carry starts at zero.
     fn plan(cfg: SmoothConfig, delta: (f64, f64), d_px: f32, w_px: f32, seed: u64) -> Flick {
-        let mut state = SmoothAim::new(cfg, 2_000_000);
+        let mut state = SmoothAim::new(cfg, 2_000_000, 1000.);
         let mut random = StdRng::seed_from_u64(seed);
         plan_flick(&mut state, delta, d_px, w_px, &mut random).expect("a non-zero delta flicks")
     }
@@ -862,7 +969,7 @@ mod tests {
         c.gain_sd = 0.;
         c.overshoot_p = 0.;
         c.gap_ms = u64::MAX; // one continuous engagement, never stale
-        let mut state = SmoothAim::new(c, 2_000_000);
+        let mut state = SmoothAim::new(c, 2_000_000, 1000.);
         let mut random = StdRng::seed_from_u64(7);
         let mut total = 0i64;
         for _ in 0..50 {
@@ -876,7 +983,7 @@ mod tests {
     fn the_leftover_fraction_never_reaches_a_whole_count() {
         let mut c = cfg();
         c.gap_ms = u64::MAX;
-        let mut state = SmoothAim::new(c, 2_000_000);
+        let mut state = SmoothAim::new(c, 2_000_000, 1000.);
         let mut random = StdRng::seed_from_u64(11);
         for step in 0..200 {
             let d = (step % 17) as f64 * 3.5 - 20.;
@@ -901,18 +1008,28 @@ mod tests {
     /// The `steps` heuristic this replaces is linear in distance, which draws a
     /// straight band on a duration-versus-distance plot. Human movement time
     /// grows with the logarithm of the distance instead.
+    ///
+    /// Only meaningful where counts are not the binding constraint, so the
+    /// delta here is far larger than any of these durations can spend. See
+    /// `a_stroke_of_a_few_counts_is_not_spread_over_the_whole_fitts_time` for
+    /// the regime where the count ceiling takes over.
     #[test]
-    fn duration_grows_with_the_log_of_the_distance_not_with_the_distance() {
+    fn duration_grows_with_the_log_of_the_distance_when_counts_are_not_the_limit() {
         let mut c = cfg();
         c.mt_jitter = 0.;
-        let short = plan(c, (10., 0.), 10., 24., 3).duration;
-        let long = plan(c, (1000., 0.), 1000., 24., 3).duration;
+        c.max_ms = 2000.; // do not let the ceiling flatten the comparison
+        let short = plan(c, (5000., 0.), 10., 24., 3).duration;
+        let long = plan(c, (5000., 0.), 1000., 24., 3).duration;
         assert!(long > short, "{long:?} vs {short:?}");
         assert!(
-            long.as_secs_f64() < 5. * short.as_secs_f64(),
+            long.as_secs_f64() < 10. * short.as_secs_f64(),
             "a hundred times the distance must not be anything like a hundred \
              times the time: {long:?} vs {short:?}"
         );
+        // With counts to spare the cadence is still the poll rate, so the
+        // stroke keeps every report Fitts asked for.
+        let f = plan(c, (5000., 0.), 1000., 24., 3);
+        assert!(f.steps.len() > 300, "{} reports", f.steps.len());
         // Equal *ratios* of distance cost equal increments of time.
         let a = fitts_duration_ms(100., 24., c.fitts_a_ms, c.fitts_b_ms);
         let b = fitts_duration_ms(200., 24., c.fitts_a_ms, c.fitts_b_ms);
@@ -920,8 +1037,45 @@ mod tests {
         assert!(((b - a) - (d - b)).abs() < 3., "{a} {b} {d}");
     }
 
-    /// A symmetric bell peaking at the midpoint is the minimum-jerk model, which
-    /// is a theoretical ideal rather than anything a hand measures like.
+    /// Counts are integers, so a report carrying less than half of one rounds
+    /// to zero and moves nothing.
+    ///
+    /// Fitts sizes a stroke in time, and at 1 kHz a 190 ms stroke is 190
+    /// reports. That is right for the hundreds of counts a full-screen flick
+    /// carries and badly wrong for an in-region correction, which is a handful:
+    /// before the count ceiling, a 40 px nudge put 3.84 counts into 190 reports
+    /// and emitted three lone ticks across 190 ms — a mouse that visibly did
+    /// not move.
+    #[test]
+    fn a_stroke_of_a_few_counts_is_not_spread_over_the_whole_fitts_time() {
+        let c = cfg();
+        // The shipped .env: SCREEN == CAPTURE so a frame pixel is a screen
+        // pixel, and MOUSE_DPI 1000 at GAME_SENS 1 makes a reach worth
+        // reach * 96/1000 counts. The whole 192 px region is under 13 of them.
+        for reach_px in [20.0f64, 40., 60., 96., 135.] {
+            let counts = reach_px * 96. / 1000.;
+            let mut state = SmoothAim::new(c, 4_000_000, 1000.);
+            let mut random = StdRng::seed_from_u64(42);
+            let f = plan_flick(&mut state, (counts, 0.), reach_px as f32, 20., &mut random)
+                .expect("a non-zero delta flicks");
+            let n = f.steps.len();
+            let nonzero = f.steps.iter().filter(|s| (s.dx, s.dy) != (0, 0)).count();
+            assert!(
+                n as f64 <= counts.max(2.),
+                "{reach_px} px: {n} reports to spend {counts:.2} counts"
+            );
+            assert!(
+                nonzero * 2 >= n,
+                "{reach_px} px: only {nonzero} of {n} reports carry anything"
+            );
+            assert!(
+                f.duration <= Duration::from_millis(20),
+                "{reach_px} px: {:?} to move {counts:.2} counts",
+                f.duration
+            );
+        }
+    }
+
     #[test]
     fn the_speed_profile_peaks_between_thirty_and_forty_five_percent_of_the_duration() {
         let mut w = Vec::new();
@@ -1063,7 +1217,7 @@ mod tests {
     /// with it, and a NaN delta is reachable from a misconfigured GAME_SENS.
     #[test]
     fn a_zero_delta_asks_for_no_movement_at_all() {
-        let mut state = SmoothAim::new(cfg(), 2_000_000);
+        let mut state = SmoothAim::new(cfg(), 2_000_000, 1000.);
         let mut random = StdRng::seed_from_u64(1);
         for delta in [
             (0., 0.),
@@ -1102,7 +1256,7 @@ mod tests {
             ..cfg()
         };
         for amp in [1e-9, 0.4, 1., 1e6] {
-            let mut state = SmoothAim::new(collapsed, 115_200);
+            let mut state = SmoothAim::new(collapsed, 115_200, 1000.);
             let t = Instant::now();
             let delta = (amp, amp);
             assert!(
@@ -1129,7 +1283,7 @@ mod tests {
             max_counts: 0,
             ..cfg()
         };
-        let mut state = SmoothAim::new(inverted, 115_200);
+        let mut state = SmoothAim::new(inverted, 115_200, 1000.);
         let t = Instant::now();
         let _ = plan_flick_at(&mut state, (50., 50.), 70., 24., &mut random, t);
         let late = t + Duration::from_millis(500);
@@ -1156,7 +1310,7 @@ mod tests {
             gain_sd: 0.,
             ..cfg()
         };
-        let mut state = SmoothAim::new(c, 2_000_000);
+        let mut state = SmoothAim::new(c, 2_000_000, 1000.);
         let mut random = StdRng::seed_from_u64(4);
         let f = plan_flick(&mut state, (400., -300.), 500., 24., &mut random).expect("flicks");
         let (cx, cy) = state.carry();
@@ -1174,17 +1328,28 @@ mod tests {
 
     /// A real mouse reports on a fixed cadence; what varies is the size of each
     /// report, not the spacing between them.
+    ///
+    /// The spacing is one poll tick when the poll rate is what limits the
+    /// stroke, and a whole multiple of the stroke otherwise: a stroke with few
+    /// counts to spend reports less often rather than finishing early, which is
+    /// what a real mouse does when it is moving slowly. What must never happen
+    /// is reporting *faster* than the hardware can, or unevenly.
     #[test]
-    fn report_deadlines_match_the_poll_rate_and_only_move_forward() {
+    fn report_deadlines_are_uniform_and_never_faster_than_the_poll_rate() {
         for baud in [115_200u32, 2_000_000] {
-            let mut state = SmoothAim::new(cfg(), baud);
+            let mut state = SmoothAim::new(cfg(), baud, 1000.);
             let hz = state.poll_hz();
             let mut random = StdRng::seed_from_u64(6);
             let f = plan_flick(&mut state, (240., 80.), 253., 24., &mut random).expect("flicks");
-            let period = Duration::from_nanos(1_000_000_000 / hz as u64);
+            let period = f.steps[0].at;
+            let floor = Duration::from_nanos(1_000_000_000 / hz as u64);
+            assert!(period >= floor, "{baud}: {period:?} is faster than {floor:?}");
             let mut prev = Duration::ZERO;
             for s in &f.steps {
-                assert_eq!(s.at - prev, period, "{baud}: at {:?}", s.at);
+                let gap = s.at - prev;
+                // Integer nanoseconds, so allow the rounding of one tick.
+                let slack = gap.abs_diff(period);
+                assert!(slack <= Duration::from_nanos(1), "{baud}: at {:?}", s.at);
                 prev = s.at;
             }
             assert_eq!(f.duration, prev, "{baud}");
@@ -1198,7 +1363,7 @@ mod tests {
             react_max_ms: 260,
             ..cfg()
         };
-        let mut state = SmoothAim::new(c, 2_000_000);
+        let mut state = SmoothAim::new(c, 2_000_000, 1000.);
         let mut random = StdRng::seed_from_u64(8);
         let t = Instant::now();
         let d = (200., 0.);
@@ -1213,7 +1378,7 @@ mod tests {
     /// spending it on the next one would pull the first flick off course.
     #[test]
     fn a_long_gap_throws_away_the_leftover_from_the_old_target() {
-        let mut state = SmoothAim::new(cfg(), 2_000_000);
+        let mut state = SmoothAim::new(cfg(), 2_000_000, 1000.);
         let mut random = StdRng::seed_from_u64(10);
         let t = Instant::now();
         plan_flick_at(&mut state, (0.4, 0.4), 4., 24., &mut random, t).expect("flicks");
@@ -1232,7 +1397,7 @@ mod tests {
     fn the_reaction_window_is_a_no_op_when_it_is_switched_off() {
         let c = cfg();
         assert_eq!((c.react_min_ms, c.react_max_ms), (0, 0));
-        let mut state = SmoothAim::new(c, 2_000_000);
+        let mut state = SmoothAim::new(c, 2_000_000, 1000.);
         let mut random = StdRng::seed_from_u64(12);
         let t = Instant::now();
         assert!(plan_flick_at(&mut state, (200., 0.), 200., 24., &mut random, t).is_some());
@@ -1244,7 +1409,7 @@ mod tests {
     fn over_many_flicks_the_rounding_residual_has_no_systematic_bias() {
         let mut c = cfg();
         c.gap_ms = u64::MAX;
-        let mut state = SmoothAim::new(c, 2_000_000);
+        let mut state = SmoothAim::new(c, 2_000_000, 1000.);
         let mut random = StdRng::seed_from_u64(21);
         let (mut sx, mut sy) = (0f64, 0f64);
         let n = 2000;
@@ -1313,5 +1478,81 @@ mod tests {
                 "seed {seed} repeated an earlier flick"
             );
         }
+    }
+
+    /// The contract the whole model has to hold to: `MOUSE_DPI` and
+    /// `GAME_SENS` are facts about the hardware and the game, not knobs, so the
+    /// counts a given on-screen reach is worth varies by orders of magnitude
+    /// between setups. Every one of them has to come out usable without
+    /// retuning.
+    #[test]
+    fn every_counts_per_pixel_produces_a_usable_stroke() {
+        let c = cfg();
+        const DPI: f64 = 1000.;
+        for cpp in [0.024f64, 0.096, 0.5, 2.0, 8.0, 32.0] {
+            let mut last = Duration::ZERO;
+            for reach in [20.0f64, 60., 135.] {
+                let counts = reach * cpp;
+                let mut st = SmoothAim::new(c, 4_000_000, DPI);
+                let mut r = StdRng::seed_from_u64(42);
+                let f = plan_flick(&mut st, (counts, 0.), reach as f32, 20., &mut r)
+                    .expect("a non-zero delta flicks");
+                let n = f.steps.len();
+                let ms = f.duration.as_secs_f64() * 1000.;
+                let ctx = format!("{cpp} counts/px, {reach} px reach, {counts:.2} counts");
+
+                // Never plan more reports than there are counts to fill them,
+                // which is what left 98% of them empty.
+                assert!(
+                    n as f64 <= (counts / c.counts_per_report).max(2.).ceil(),
+                    "{ctx}: {n} reports"
+                );
+                // Never imply a hand speed outside the physical envelope. Below
+                // a couple of counts there is nothing to shape — the integer
+                // grid decides, the stroke is the two-report minimum, and what
+                // it cannot express is carried to the next frame — so the
+                // envelope is only meaningful above that.
+                let ips = (counts / DPI) / (ms / 1000.);
+                if counts >= 2. {
+                    assert!(
+                        ips >= c.min_speed_ips * 0.5 && ips <= c.max_speed_ips * 1.5,
+                        "{ctx}: implies {ips:.3} in/s over {ms:.1} ms"
+                    );
+                } else {
+                    assert!(n == 2, "{ctx}: {n} reports for a sub-count move");
+                    assert!(ms <= 5., "{ctx}: {ms:.1} ms for a sub-count move");
+                }
+                // Never take longer than an aimed reach of this difficulty.
+                let fitts = fitts_duration_ms(reach, 20., c.fitts_a_ms, c.fitts_b_ms);
+                assert!(ms <= fitts * 1.5, "{ctx}: {ms:.1} ms vs Fitts {fitts:.1} ms");
+                // Reaching further must never be quicker.
+                assert!(f.duration >= last, "{ctx}: {ms:.1} ms after {last:?}");
+                last = f.duration;
+            }
+        }
+    }
+
+    /// The same stroke must not change shape just because the mouse counts
+    /// its inches differently: a 400 DPI and a 1600 DPI mouse asked for the
+    /// same physical movement should take about the same time.
+    #[test]
+    fn the_same_physical_movement_takes_the_same_time_at_any_dpi() {
+        let c = cfg();
+        let mut at = |dpi: f64| {
+            // A tenth of an inch of hand travel, whatever that is in counts.
+            let counts = 0.1 * dpi;
+            let mut st = SmoothAim::new(c, 4_000_000, dpi);
+            let mut r = StdRng::seed_from_u64(3);
+            plan_flick(&mut st, (counts, 0.), 135., 20., &mut r)
+                .expect("flicks")
+                .duration
+                .as_secs_f64()
+                * 1000.
+        };
+        let (lo, hi) = (at(400.), at(1600.));
+        assert!(
+            (lo - hi).abs() < 0.25 * lo.max(hi),
+            "same movement took {lo:.1} ms at 400 dpi and {hi:.1} ms at 1600 dpi"
+        );
     }
 }

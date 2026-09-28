@@ -197,7 +197,7 @@ fn main() -> Result<()> {
 
             let mut random = rand::rng();
             #[cfg(not(feature = "disable-mouse"))]
-            let mut smooth = SmoothAim::new(config.smooth, config.makcu_baud);
+            let mut smooth = SmoothAim::new(config.smooth, config.makcu_baud, config.mouse_dpi);
             // Fitts measures *visual* difficulty, so it wants screen pixels,
             // while `dist` and `min_zone` are frame pixels. The two coincide
             // only when the capture matches the screen.

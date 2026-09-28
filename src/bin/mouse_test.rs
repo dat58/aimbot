@@ -76,7 +76,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     tracing::info!("[4] Testing side5 mouse button presses successfully");
     tracing::info!("---------------------------------------------------");
     let mut random = rand::rng();
-    let mut smooth = SmoothAim::new(config.smooth, config.makcu_baud);
+    let mut smooth = SmoothAim::new(config.smooth, config.makcu_baud, config.mouse_dpi);
     let mut use_smooth = true;
     tracing::info!("[5] Testing for mouse move");
     tracing::info!("[5] Input separate for dy, dy; type q to quit, s to switch path");

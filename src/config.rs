@@ -140,6 +140,20 @@ pub struct SmoothConfig {
     /// deciding to shoot, so it should not be zero.
     pub auto_click_lower_ms: u64,
     pub auto_click_upper_ms: u64,
+    /// Chance in `[0, 1]` that a click is fired without letting the aim settle
+    /// first — a deliberate miss. `0` never misses, `1` always does.
+    ///
+    /// Both outcomes wait out the same `auto_click_lower_ms..upper_ms`. What
+    /// separates them is whether the mouse keeps correcting during that wait.
+    /// Holding still leaves the crosshair wherever the ballistic gain put it,
+    /// which on a long flick is 12-20 screen pixels off a ~20 pixel target, so
+    /// the shot misses. Tracking through the wait lets the corrections land
+    /// first and the shot is on target.
+    ///
+    /// Worth having above zero: never missing is itself a signature. Note this
+    /// is unrelated to [`Self::overshoot_p`], which decides whether a *movement*
+    /// goes past its target rather than whether a *shot* does.
+    pub auto_click_miss_p: f64,
     /// Smallest gap between two clicks, in milliseconds. `0` disables the
     /// limit.
     ///
@@ -230,6 +244,7 @@ impl Default for SmoothConfig {
             auto_click: false,
             auto_click_lower_ms: 100,
             auto_click_upper_ms: 130,
+            auto_click_miss_p: 0.0,
             auto_click_rate_limit_ms: 0,
             counts_per_report: 2.0,
             // A slow deliberate correction and a hard flick, respectively.
@@ -562,6 +577,10 @@ impl Config {
             auto_click_upper_ms: smooth_u64(
                 "MOVE_SMOOTH_AUTO_CLICK_UPPER_MS",
                 default_smooth.auto_click_upper_ms,
+            ),
+            auto_click_miss_p: smooth_f(
+                "MOVE_SMOOTH_AUTO_CLICK_MISS_P",
+                default_smooth.auto_click_miss_p,
             ),
             auto_click_rate_limit_ms: smooth_u64(
                 "MOVE_SMOOTH_AUTO_CLICK_RATE_LIMIT",

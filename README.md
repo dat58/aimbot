@@ -434,6 +434,38 @@ All optional. Every value here is read once at startup.
 | `MOVE_SMOOTH_MAX_MS` | `320` | Ceiling on `MT`, for the longest flicks. |
 | `MOVE_SMOOTH_POLL_HZ` | `0` | Report cadence. `0` picks 1000 Hz at `MAKCU_BAUD` ≥ 2M and 250 Hz below. **Does not change `MT`**; see [Choosing POLL_HZ](#choosing-poll_hz). |
 
+#### Report density — why a flick can look like it is not moving
+
+Counts are integers, so a report carrying less than half of one rounds to zero
+and moves nothing. Fitts sizes a flick in *time*, and at 1 kHz a 190 ms flick is
+190 reports — right for the hundreds of counts a full-screen flick carries, and
+badly wrong for an in-region correction, which is a handful.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `MOVE_SMOOTH_COUNTS_PER_REPORT` | `2.0` | Mean counts one report carries, which caps how many reports a flick is worth planning. Below `1` most reports go empty again; raise it for fewer, larger reports. **Does not change the duration** — the reports spread out instead. |
+| `MOVE_SMOOTH_MIN_SPEED_IPS` | `0.6` | Slowest the hand is allowed to travel, inches per second. Below a few hundred counts **this is what sets the duration**, not Fitts. |
+| `MOVE_SMOOTH_MAX_SPEED_IPS` | `40` | Fastest. Rarely binds; it stops a huge flick becoming a teleport. |
+
+Fitts's index of difficulty is a *ratio* of distance to width, so it is the same
+for a 5-count flick and a 5000-count one and says nothing about how far the hand
+moves. `counts / MOUSE_DPI` does — it is inches. The speed envelope is expressed
+in inches precisely so it holds at any `MOUSE_DPI` and `GAME_SENS` without
+retuning, since neither is a knob you get to pick.
+
+Fitts describes *aimed* reaches, where landing accurately is the cost. A
+correction far too small for that just travels at the hand's comfortable speed,
+which makes its duration proportional to its length — Fitts's law is known to
+flatten out at very low indices of difficulty for the same reason.
+
+Measured at `GAME_SENS=0.38`, `MOUSE_DPI=1000` on a real MAKCU:
+
+| Reach | Counts | Reports | Duration |
+| --- | --- | --- | --- |
+| 20 px | 1.92 | 2 | 2.7 ms |
+| 60 px | 5.76 | 3 | 9.8 ms |
+| 135 px | 12.96 | 6 | 19.9 ms |
+
 #### Accuracy
 
 | Variable | Default | Effect |
@@ -470,6 +502,58 @@ trigger.
 "Fresh" means no flick for 250 ms — and time spent inside `min_zone` counts,
 because nothing is flicked there. With the delay on, the hand therefore
 re-reacts after every pause, not only on a new target.
+
+### Auto click
+
+Fires a left click once a flick has been played. Only the `move_smooth` path
+does this, so with `MOVE_SMOOTH` unset that means ESP button 2 only. The click
+runs on the mouse worker thread, so the aim loop never blocks on it.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `MOVE_SMOOTH_AUTO_CLICK` | `false` | Turn it on. |
+| `MOVE_SMOOTH_AUTO_CLICK_LOWER_MS` / `_UPPER_MS` | `100` / `130` | Wait between the flick ending and the click, drawn uniformly. Stands in for deciding to shoot. |
+| `MOVE_SMOOTH_AUTO_CLICK_RATE_LIMIT` | `0` | Smallest gap between two clicks, ms. `0` is no limit. |
+| `MOVE_SMOOTH_AUTO_CLICK_MISS_P` | `0.0` | Chance in `[0, 1]` the shot is fired without letting the aim settle — a deliberate miss. |
+
+**Rate limit.** Without one, a held trigger clicks once per flick and a flick is
+planned once per frame, so the rate is whatever the delay above works out to:
+
+| `RATE_LIMIT` | Clicks/s | Gap | Cycles that skip the click |
+| --- | --- | --- | --- |
+| `0` | 5.80 | 172 ms | 0% |
+| `250` | 3.90 | 256 ms | 87% |
+| `500` | 2.00 | 500 ms | 96% |
+| `1000` | 1.00 | 1000 ms | 99% |
+
+The gap is measured click to click, and the delay before the click counts toward
+it. A refused click is skipped outright rather than deferred, so the worker goes
+straight back to tracking instead of sleeping out a delay it will not use —
+which is why a limit makes the aim *smoother*, not slower. Pick by weapon: `0`
+for automatic, `150`–`250` for semi-auto, `800`–`1500` for a sniper.
+
+**Miss probability.** Both outcomes wait out the same
+`LOWER_MS`–`UPPER_MS`; what separates them is whether the mouse keeps correcting
+during that wait:
+
+| `MISS_P` outcome | During the wait | Result |
+| --- | --- | --- |
+| miss | holds still | the crosshair keeps the ballistic error, so the shot misses |
+| hit | plays the corrections still arriving | the crosshair is on target when it fires |
+
+The error it keeps is what `MOVE_SMOOTH_GAIN` left behind, measured over 4000
+flicks at `GAME_SENS=0.38` against a ~20 px target:
+
+| Reach | Residual p50 | Residual p90 | Overshot |
+| --- | --- | --- | --- |
+| 20 px | 0.21 px | 4.17 px | 3.5% |
+| 60 px | 4.58 px | 8.54 px | 12.2% |
+| 135 px | 12.29 px | 20.21 px | 13.4% |
+
+So a miss only really misses on a long flick; a 20 px correction lands on target
+either way. Worth setting above zero regardless — never missing is itself a
+signature. Not to be confused with `MOVE_SMOOTH_OVERSHOOT_P`, which decides
+whether a *movement* goes past its target rather than whether a *shot* does.
 
 ### Choosing POLL_HZ
 
@@ -706,6 +790,13 @@ What each one does, how to compute its effect and presets by FOV are under
 | `MOVE_SMOOTH_NOISE` | `0.022` | Signal-dependent motor noise coefficient |
 | `MOVE_SMOOTH_TREMOR` | `0.35` | Physiological tremor amplitude in counts; `0` disables it |
 | `MOVE_SMOOTH_REACT_MIN_MS` / `_MAX_MS` | `0` / `0` | Reaction latency on a fresh target; off by default |
+| `MOVE_SMOOTH_COUNTS_PER_REPORT` | `2.0` | Mean counts one report carries; caps how many reports a flick plans |
+| `MOVE_SMOOTH_MIN_SPEED_IPS` / `_MAX_SPEED_IPS` | `0.6` / `40` | Hand-speed envelope in inches per second; the floor sets the duration below a few hundred counts |
+| `MOVE_SMOOTH_MOVE_NOW` | `false` | Emit `km.move_now` instead of `km.move`. Probed at connect and ignored on firmware without it |
+| `MOVE_SMOOTH_AUTO_CLICK` | `false` | Click once a flick has settled |
+| `MOVE_SMOOTH_AUTO_CLICK_LOWER_MS` / `_UPPER_MS` | `100` / `130` | Wait between the flick and the click |
+| `MOVE_SMOOTH_AUTO_CLICK_RATE_LIMIT` | `0` | Smallest gap between two clicks, ms; `0` is no limit |
+| `MOVE_SMOOTH_AUTO_CLICK_MISS_P` | `0.0` | Chance the shot is fired without letting the aim settle |
 
 Capture-card variables are in
 [Capture from a capture card](#capture-from-a-capture-card).

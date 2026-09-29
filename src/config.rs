@@ -59,6 +59,186 @@ pub fn mouse_counts(
     )
 }
 
+/// Report cadence for the smooth-aim playback, derived from the link speed.
+///
+/// A `km.move(-12,-7)` line is about 18 bytes and 8N1 puts ten bits on the
+/// wire per byte, so 115200 baud carries roughly 640 commands a second — at
+/// 250 Hz the link stays near 39% busy even in the pathological case where
+/// every report is non-zero. At 2M and above the same arithmetic puts 1000 Hz
+/// under 10%. The 1000 Hz ceiling is deliberate rather than a throughput
+/// limit: no real mouse reports faster, so a higher cadence would itself be a
+/// signature.
+pub fn poll_hz_for_baud(baud: u32) -> u32 {
+    if baud >= 2_000_000 { 1000 } else { 250 }
+}
+
+/// Numeric tuning for the human-flick model behind
+/// [`crate::mouse::MouseVirtual::move_smooth`].
+///
+/// Whether that model is used at all is not decided here. `MOVE_SMOOTH` picks
+/// it over `move_bezier` for the ordinary aim modes, and
+/// [`crate::aim::AimMode::aim_smooth`] — the ESP button 2 path — always uses
+/// it regardless.
+#[derive(Debug, Clone, Copy)]
+pub struct SmoothConfig {
+    /// Report cadence. `0` derives it from `MAKCU_BAUD`; see
+    /// [`poll_hz_for_baud`].
+    pub poll_hz: u32,
+    /// Fitts intercept, milliseconds.
+    pub fitts_a_ms: f64,
+    /// Fitts slope, milliseconds per bit of index of difficulty.
+    pub fitts_b_ms: f64,
+    pub min_ms: f64,
+    pub max_ms: f64,
+    /// Lognormal spread applied to the movement time, as a fraction. 0.12
+    /// gives a coefficient of variation near 12%, which is what human
+    /// trial-to-trial variability looks like.
+    pub mt_jitter: f64,
+    /// Fraction of the distance the ballistic phase commits to. The rest is
+    /// left for the next frame's corrective submovement.
+    pub gain: f64,
+    pub gain_sd: f64,
+    /// How often a flick overshoots instead of falling short.
+    pub overshoot_p: f64,
+    /// Where peak speed sits, as a fraction of the movement time.
+    pub peak_min: f64,
+    pub peak_max: f64,
+    /// Maximum perpendicular deviation from the straight line, as a fraction
+    /// of the amplitude.
+    pub bow: f64,
+    /// How strongly the bow direction follows the direction of travel. `0` is
+    /// a coin flip, `0.5` is fully handed.
+    pub curve_bias: f64,
+    /// Skews where along the path the bow peaks.
+    pub kappa_min: f64,
+    pub kappa_max: f64,
+    /// Harris & Wolpert coefficient: noise standard deviation as a fraction of
+    /// the per-report displacement.
+    pub noise: f64,
+    /// Physiological tremor amplitude, in mouse counts. `0` disables it.
+    pub tremor: f64,
+    /// Reaction latency on a fresh acquisition. Off by default, because the
+    /// ESP trigger button already supplies a human reaction time — the command
+    /// only leaves this process while that button is held.
+    pub react_min_ms: u64,
+    pub react_max_ms: u64,
+    /// Silence longer than this means the old target is gone, so the leftover
+    /// sub-count fraction describes a move that no longer exists.
+    pub gap_ms: u64,
+    /// Ceiling on a single report, in counts. Excess is deferred to the next
+    /// report rather than dropped.
+    pub max_counts: i64,
+    /// Fire a left click once the flick has settled.
+    ///
+    /// Only the `move_smooth` path does this. It fires after *every* flick, and
+    /// `move_smooth` is called once per frame while the trigger is held, so a
+    /// held trigger produces a click roughly every
+    /// `auto_click_lower_ms + hold` — a few per second, not one per target.
+    pub auto_click: bool,
+    /// Delay between the flick ending and the click, in milliseconds, drawn
+    /// uniformly. Stands in for the gap between settling on a target and
+    /// deciding to shoot, so it should not be zero.
+    pub auto_click_lower_ms: u64,
+    pub auto_click_upper_ms: u64,
+    /// Smallest gap between two clicks, in milliseconds. `0` disables the
+    /// limit.
+    ///
+    /// Without it a held trigger clicks once per flick, and a flick is planned
+    /// once per frame, so the rate is whatever the frame rate and the click
+    /// delay happen to multiply out to. A limited click is skipped outright
+    /// rather than deferred: the worker does not even wait out the delay, so
+    /// the aim keeps tracking instead of stalling on a click it will not fire.
+    pub auto_click_rate_limit_ms: u64,
+    /// Hand-speed envelope, in inches per second of physical mouse travel.
+    ///
+    /// Fitts's index of difficulty is a *ratio* of distance to target width, so
+    /// it is dimensionless and says nothing about how far the hand actually
+    /// moves. Counts do: `counts / MOUSE_DPI` is inches. Without this bound the
+    /// same 250 ms stroke is asked of 500 counts and of 5, and the second one
+    /// implies a hand creeping at hundredths of an inch per second — a
+    /// deliberate crawl, not an aim, and the reason this visibly failed to move
+    /// at a low counts-per-pixel.
+    ///
+    /// `min_speed_ips` is not merely a rail: below a few hundred counts it is
+    /// what actually sets the duration, and Fitts takes over above that. This
+    /// is the right way round. Fitts describes *aimed* reaches, where landing
+    /// accurately is the cost; a correction far too small for that just travels
+    /// at the hand's comfortable speed, which makes its duration proportional
+    /// to its length. Fitts's law is known to flatten out at very low indices
+    /// of difficulty for the same reason.
+    ///
+    /// Expressing both in inches rather than counts is what makes them hold at
+    /// any `MOUSE_DPI` and `GAME_SENS`, instead of needing a retune whenever
+    /// the counts-per-pixel changes — which is not a tuning knob but a fact
+    /// about the mouse and the game.
+    pub min_speed_ips: f64,
+    pub max_speed_ips: f64,
+    /// Send each report as `km.move_now` instead of `km.move`.
+    ///
+    /// MAKCU firmware V4.028+ interpolates a plain `km.move` internally, over
+    /// roughly 4-42 ms depending on magnitude. This driver does its own
+    /// interpolation and times every report itself, so that second layer only
+    /// smears the profile and lets commands queue up behind each other.
+    /// `km.move_now` puts the counts in the next report untouched, which is
+    /// what a per-report driver wants.
+    ///
+    /// Off by default because the command does not exist on older firmware,
+    /// where enabling it would stop the mouse moving at all.
+    pub move_now: bool,
+    /// Mean counts a report should carry, which sets how many reports a stroke
+    /// of a given amplitude is worth planning.
+    ///
+    /// Reports are the resolution limit of the whole model: counts are
+    /// integers, so a report holding less than half a count rounds to zero and
+    /// moves nothing. Fitts's law sizes a stroke in *time*, and at 1 kHz a
+    /// 250 ms stroke is 250 reports — fine for the hundreds of counts a
+    /// full-screen flick carries, useless for the handful of counts an
+    /// in-region correction carries, where it leaves 98% of the reports empty
+    /// and the mouse visibly crawling.
+    ///
+    /// A real mouse mid-flick reports tens of counts at a time, so anything at
+    /// or above ~1 keeps every report doing work. Raise it for fewer, larger
+    /// reports; below 1 the zero-report problem starts to come back.
+    pub counts_per_report: f64,
+}
+
+impl Default for SmoothConfig {
+    fn default() -> Self {
+        Self {
+            poll_hz: 0,
+            fitts_a_ms: 35.,
+            fitts_b_ms: 55.,
+            min_ms: 45.,
+            max_ms: 320.,
+            mt_jitter: 0.12,
+            gain: 0.90,
+            gain_sd: 0.045,
+            overshoot_p: 0.15,
+            peak_min: 0.30,
+            peak_max: 0.45,
+            bow: 0.03,
+            curve_bias: 0.30,
+            kappa_min: 0.85,
+            kappa_max: 1.25,
+            noise: 0.022,
+            tremor: 0.35,
+            react_min_ms: 0,
+            react_max_ms: 0,
+            gap_ms: 250,
+            max_counts: 127,
+            move_now: false,
+            auto_click: false,
+            auto_click_lower_ms: 100,
+            auto_click_upper_ms: 130,
+            auto_click_rate_limit_ms: 0,
+            counts_per_report: 2.0,
+            // A slow deliberate correction and a hard flick, respectively.
+            min_speed_ips: 0.6,
+            max_speed_ips: 40.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub event_listener_port: u16,
@@ -133,6 +313,12 @@ pub struct Config {
     pub makcu_listen: bool,
     pub mouse_dpi: f64,
     pub game_sens: f64,
+    /// `MOVE_SMOOTH`: move through the human-flick model instead of the
+    /// firmware bezier in the ordinary aim modes. The ESP button 2 path uses
+    /// it whatever this says.
+    pub move_smooth: bool,
+    /// Tuning for the human-flick model; see [`SmoothConfig`].
+    pub smooth: SmoothConfig,
 
     pub esp_port: Option<String>,
     pub default_aim_mode: Option<u8>,
@@ -317,6 +503,78 @@ impl Config {
             .unwrap_or("1.".to_string())
             .parse::<f64>()
             .expect("GAME_SENS is not a number");
+        // `mouse_counts` divides by both. A zero there yields an infinite
+        // delta, and `NaN as i32` saturates to zero rather than panicking, so
+        // the failure would be a silently frozen aim instead of a crash.
+        if !(game_sens > 0.) {
+            panic!("GAME_SENS must be greater than zero");
+        }
+        if !(mouse_dpi > 0.) {
+            panic!("MOUSE_DPI must be greater than zero");
+        }
+        let move_smooth = var("MOVE_SMOOTH")
+            .unwrap_or("false".to_string())
+            .parse::<bool>()
+            .expect("MOVE_SMOOTH is not a bool");
+        let default_smooth = SmoothConfig::default();
+        let smooth_f = |name: &str, default: f64| -> f64 {
+            var(name)
+                .unwrap_or(default.to_string())
+                .parse::<f64>()
+                .unwrap_or_else(|_| panic!("{name} is not a number"))
+        };
+        let smooth_u64 = |name: &str, default: u64| -> u64 {
+            var(name)
+                .unwrap_or(default.to_string())
+                .parse::<u64>()
+                .unwrap_or_else(|_| panic!("{name} is not an integer"))
+        };
+        let smooth = SmoothConfig {
+            poll_hz: var("MOVE_SMOOTH_POLL_HZ")
+                .unwrap_or("0".to_string())
+                .parse::<u32>()
+                .expect("MOVE_SMOOTH_POLL_HZ is not a number"),
+            fitts_a_ms: smooth_f("MOVE_SMOOTH_FITTS_A_MS", default_smooth.fitts_a_ms),
+            fitts_b_ms: smooth_f("MOVE_SMOOTH_FITTS_B_MS", default_smooth.fitts_b_ms),
+            min_ms: smooth_f("MOVE_SMOOTH_MIN_MS", default_smooth.min_ms),
+            max_ms: smooth_f("MOVE_SMOOTH_MAX_MS", default_smooth.max_ms),
+            gain: smooth_f("MOVE_SMOOTH_GAIN", default_smooth.gain),
+            overshoot_p: smooth_f("MOVE_SMOOTH_OVERSHOOT_P", default_smooth.overshoot_p),
+            peak_min: smooth_f("MOVE_SMOOTH_PEAK_MIN", default_smooth.peak_min),
+            peak_max: smooth_f("MOVE_SMOOTH_PEAK_MAX", default_smooth.peak_max),
+            bow: smooth_f("MOVE_SMOOTH_BOW", default_smooth.bow),
+            noise: smooth_f("MOVE_SMOOTH_NOISE", default_smooth.noise),
+            tremor: smooth_f("MOVE_SMOOTH_TREMOR", default_smooth.tremor),
+            react_min_ms: smooth_u64("MOVE_SMOOTH_REACT_MIN_MS", default_smooth.react_min_ms),
+            react_max_ms: smooth_u64("MOVE_SMOOTH_REACT_MAX_MS", default_smooth.react_max_ms),
+            move_now: var("MOVE_SMOOTH_MOVE_NOW")
+                .unwrap_or(default_smooth.move_now.to_string())
+                .parse::<bool>()
+                .expect("MOVE_SMOOTH_MOVE_NOW is not a bool"),
+            auto_click: var("MOVE_SMOOTH_AUTO_CLICK")
+                .unwrap_or(default_smooth.auto_click.to_string())
+                .parse::<bool>()
+                .expect("MOVE_SMOOTH_AUTO_CLICK is not a bool"),
+            auto_click_lower_ms: smooth_u64(
+                "MOVE_SMOOTH_AUTO_CLICK_LOWER_MS",
+                default_smooth.auto_click_lower_ms,
+            ),
+            auto_click_upper_ms: smooth_u64(
+                "MOVE_SMOOTH_AUTO_CLICK_UPPER_MS",
+                default_smooth.auto_click_upper_ms,
+            ),
+            auto_click_rate_limit_ms: smooth_u64(
+                "MOVE_SMOOTH_AUTO_CLICK_RATE_LIMIT",
+                default_smooth.auto_click_rate_limit_ms,
+            ),
+            min_speed_ips: smooth_f("MOVE_SMOOTH_MIN_SPEED_IPS", default_smooth.min_speed_ips),
+            max_speed_ips: smooth_f("MOVE_SMOOTH_MAX_SPEED_IPS", default_smooth.max_speed_ips),
+            counts_per_report: smooth_f(
+                "MOVE_SMOOTH_COUNTS_PER_REPORT",
+                default_smooth.counts_per_report,
+            ),
+            ..default_smooth
+        };
         let esp_port = var("ESP_PORT").ok();
         // Compared against `dist`, which is a frame-pixel distance because
         // `min_zone` comes straight off bbox dimensions.
@@ -381,6 +639,8 @@ impl Config {
             makcu_listen,
             mouse_dpi,
             game_sens,
+            move_smooth,
+            smooth,
             esp_port,
             fov,
             default_aim_mode,
@@ -416,7 +676,11 @@ mod tests {
     /// factor derived from a number that describes nothing.
     #[test]
     fn non_v4l2_sources_are_pinned_to_the_screen() {
-        for source in ["ndi://192.168.2.3", "udp://127.0.0.1:4200", "assets/clip.mp4"] {
+        for source in [
+            "ndi://192.168.2.3",
+            "udp://127.0.0.1:4200",
+            "assets/clip.mp4",
+        ] {
             let (frame, scale) = frame_geometry(source, (2560, 1440), (1920, 1080));
             assert_eq!(frame, (2560, 1440), "{source}");
             assert_eq!(scale, (1.0, 1.0), "{source}");
@@ -463,8 +727,27 @@ mod tests {
         ] {
             let ((frame_w, frame_h), scale) = frame_geometry("elgato://", screen, capture);
             let crosshair = (frame_w as f32 / 2., frame_h as f32 / 2.);
-            let delta = (crosshair.0 - frame_w as f32 / 2., crosshair.1 - frame_h as f32 / 2.);
+            let delta = (
+                crosshair.0 - frame_w as f32 / 2.,
+                crosshair.1 - frame_h as f32 / 2.,
+            );
             assert_eq!(mouse_counts(delta, scale, 1.0, 1000.), (0., 0.));
+        }
+    }
+
+    /// A `km.move` line is about 18 bytes and 8N1 spends ten bits per byte, so
+    /// the cadence has to leave headroom even at the slowest allowed link —
+    /// otherwise one stalled write pushes every later report past its
+    /// deadline and the velocity profile smears.
+    #[test]
+    fn the_report_rate_stays_inside_the_serial_byte_budget_at_every_baud() {
+        const LINE_BYTES: f64 = 18.;
+        const BITS_PER_BYTE: f64 = 10.;
+        for (baud, expected) in [(115_200u32, 250u32), (2_000_000, 1000), (4_000_000, 1000)] {
+            let hz = poll_hz_for_baud(baud);
+            assert_eq!(hz, expected, "{baud}");
+            let duty = hz as f64 * LINE_BYTES * BITS_PER_BYTE / baud as f64;
+            assert!(duty < 0.5, "{baud} would run the link {duty:.2} busy");
         }
     }
 }

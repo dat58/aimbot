@@ -223,41 +223,7 @@ impl MouseVirtual {
             reach_px,
             width_px,
         );
-        self.play_flick(&flick, &keep_going)?;
-
-        let cfg = smooth.config();
-        // A flick that was abandoned half way was abandoned for a reason, so
-        // there is nothing to shoot at.
-        if !cfg.auto_click || !keep_going() {
-            return Ok(());
-        }
-        let wait = auto_click_delay(cfg.auto_click_lower_ms, cfg.auto_click_upper_ms, random);
-        // Checked before the wait, not after: a click this would refuse is
-        // skipped outright, so the worker goes straight back to tracking
-        // instead of sleeping out a delay it will not use.
-        if !click_allowed(
-            smooth.last_click,
-            Instant::now(),
-            wait,
-            cfg.auto_click_rate_limit_ms,
-        ) {
-            return Ok(());
-        }
-        sleep(wait);
-        // Re-read the trigger: the wait is long enough that it can be let go
-        // inside it, and firing after that is a shot nobody asked for.
-        if !keep_going() {
-            return Ok(());
-        }
-        tracing::debug!("[Smooth] auto click after {:?}", wait);
-        // Stamped at the press, not after the release: the limit is a gap
-        // between clicks, and `click_left` holds the button for tens of
-        // milliseconds. Stamping afterwards would quietly add that hold to
-        // every gap.
-        let pressed_at = Instant::now();
-        self.click_left(random)?;
-        smooth.last_click = Some(pressed_at);
-        Ok(())
+        self.play_flick(&flick, &keep_going)
     }
 
     /// Play a flick planned by [`plan_flick`], one `km.move` per report
@@ -757,26 +723,121 @@ pub fn handle_mouse(
             sleep(IDLE_POLL);
             continue;
         };
-        let result = match request {
-            MoveRequest::Smooth {
-                delta,
-                reach_px,
-                width_px,
-            } => mouse.move_smooth(
-                &mut smooth,
-                delta,
-                reach_px,
-                width_px,
-                &mut random,
-                &keep_going,
-            ),
-            MoveRequest::Bezier { delta } => mouse.move_bezier(delta.0, delta.1, &mut random),
-        };
-        // A failed command is one lost aim, not a reason to stop aiming: the
-        // next frame plans afresh from wherever the crosshair actually is.
-        if let Err(e) = result {
-            tracing::error!("[Mouse] {}", e);
+        let smooth_move = matches!(request, MoveRequest::Smooth { .. });
+        play_request(&mouse, &mut smooth, &mut random, &keep_going, request);
+        // Only the human-flick path clicks; a bezier move is the plain path and
+        // was never part of this.
+        if !smooth_move {
+            continue;
         }
+
+        let until = match plan_click(&smooth, &mut random) {
+            ClickPlan::None => continue,
+            // Hold still: whatever the flick got wrong is what the shot carries.
+            ClickPlan::Miss(wait) => {
+                tracing::debug!("[Smooth] auto click after {wait:?}, holding still (miss)");
+                sleep(wait);
+                None
+            }
+            // Keep taking aim: the corrections still arriving get played inside
+            // the wait, so the crosshair is on target by the time it fires.
+            ClickPlan::Settle(wait) => {
+                tracing::debug!("[Smooth] auto click after {wait:?}, still tracking (hit)");
+                Some(Instant::now() + wait)
+            }
+        };
+        if let Some(deadline) = until {
+            while Instant::now() < deadline {
+                match queue.pop() {
+                    Some(request) => {
+                        play_request(&mouse, &mut smooth, &mut random, &keep_going, request)
+                    }
+                    None => sleep(IDLE_POLL),
+                }
+            }
+        }
+
+        // Re-read the trigger: the wait is long enough to be let go inside, and
+        // firing after that is a shot nobody asked for.
+        if !keep_going() {
+            continue;
+        }
+        // Stamped at the press, not after the release: the rate limit is a gap
+        // between clicks and `click_left` holds the button for tens of
+        // milliseconds, which would otherwise be added to every gap.
+        let pressed_at = Instant::now();
+        match mouse.click_left(&mut random) {
+            Ok(()) => smooth.last_click = Some(pressed_at),
+            Err(e) => tracing::error!("[Mouse] {}", e),
+        }
+    }
+}
+
+/// Play one request. A failed command is one lost aim, not a reason to stop
+/// aiming: the next frame plans afresh from wherever the crosshair actually is.
+fn play_request<F: Fn() -> bool>(
+    mouse: &MouseVirtual,
+    smooth: &mut SmoothAim,
+    random: &mut rand::rngs::ThreadRng,
+    keep_going: &F,
+    request: MoveRequest,
+) {
+    let result = match request {
+        MoveRequest::Smooth {
+            delta,
+            reach_px,
+            width_px,
+        } => mouse.move_smooth(smooth, delta, reach_px, width_px, random, keep_going),
+        MoveRequest::Bezier { delta } => mouse.move_bezier(delta.0, delta.1, random),
+    };
+    if let Err(e) = result {
+        tracing::error!("[Mouse] {}", e);
+    }
+}
+
+/// What the auto click should do once a flick has been played.
+///
+/// Both outcomes wait out the same delay; the difference is what the mouse
+/// does during it, which is what decides whether the shot lands.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ClickPlan {
+    /// Do not click.
+    None,
+    /// Hold still for this long, then fire. The crosshair stays where the
+    /// flick left it, so the shot carries the whole ballistic error — on a long
+    /// flick that is 12-20 screen pixels off a ~20 pixel target, and it misses.
+    Miss(Duration),
+    /// Keep taking aim for this long, then fire. The corrections land inside
+    /// the wait, so the shot is on target.
+    Settle(Duration),
+}
+
+/// Decide what happens after a flick: nothing, a miss, or a hit.
+///
+/// Lives here rather than in `move_smooth` because settling means playing the
+/// corrections that are still arriving, and only the worker holds the queue
+/// they arrive on. Keeping it out of `move_smooth` also stops those correction
+/// flicks from each planning a click of their own.
+pub fn plan_click(state: &SmoothAim, random: &mut impl Rng) -> ClickPlan {
+    let cfg = state.cfg;
+    if !cfg.auto_click {
+        return ClickPlan::None;
+    }
+    let wait = auto_click_delay(cfg.auto_click_lower_ms, cfg.auto_click_upper_ms, random);
+    // Asked before the wait, so a click the limit would refuse costs no time at
+    // all and the worker goes straight back to tracking.
+    if !click_allowed(
+        state.last_click,
+        Instant::now(),
+        wait,
+        cfg.auto_click_rate_limit_ms,
+    ) {
+        return ClickPlan::None;
+    }
+    if random.random::<f64>() < cfg.auto_click_miss_p.clamp(0., 1.) {
+        ClickPlan::Miss(wait)
+    } else {
+        ClickPlan::Settle(wait)
     }
 }
 
@@ -1838,5 +1899,106 @@ mod tests {
             t += wait.as_millis() as u64 + 55;
         }
         assert!((5..=7).contains(&clicks.div_ceil(10)), "{clicks} clicks in 10 s");
+    }
+
+    fn click_cfg(miss_p: f64) -> SmoothConfig {
+        SmoothConfig {
+            auto_click: true,
+            auto_click_miss_p: miss_p,
+            auto_click_rate_limit_ms: 0,
+            ..cfg()
+        }
+    }
+
+    #[test]
+    fn a_miss_probability_of_zero_never_misses_and_one_always_does() {
+        let mut r = StdRng::seed_from_u64(5);
+        for _ in 0..500 {
+            let never = SmoothAim::new(click_cfg(0.), 4_000_000, 1000.);
+            assert!(matches!(plan_click(&never, &mut r), ClickPlan::Settle(_)));
+            let always = SmoothAim::new(click_cfg(1.), 4_000_000, 1000.);
+            assert!(matches!(plan_click(&always, &mut r), ClickPlan::Miss(_)));
+        }
+    }
+
+    #[test]
+    fn a_miss_probability_in_between_splits_at_about_that_rate() {
+        for p in [0.15f64, 0.5, 0.85] {
+            let mut r = StdRng::seed_from_u64(9);
+            let n = 4000;
+            let misses = (0..n)
+                .filter(|_| {
+                    let st = SmoothAim::new(click_cfg(p), 4_000_000, 1000.);
+                    matches!(plan_click(&st, &mut r), ClickPlan::Miss(_))
+                })
+                .count();
+            let rate = misses as f64 / n as f64;
+            assert!((rate - p).abs() < 0.03, "asked {p}, got {rate:.3}");
+        }
+    }
+
+    /// The two outcomes differ in what the mouse does during the wait, not in
+    /// how long it waits — a miss that also fired sooner would be telling on
+    /// itself twice.
+    #[test]
+    fn both_outcomes_wait_out_the_same_configured_window() {
+        let mut r = StdRng::seed_from_u64(13);
+        for _ in 0..1000 {
+            for p in [0.0f64, 1.0] {
+                let st = SmoothAim::new(click_cfg(p), 4_000_000, 1000.);
+                let wait = match plan_click(&st, &mut r) {
+                    ClickPlan::Miss(w) | ClickPlan::Settle(w) => w,
+                    ClickPlan::None => unreachable!("auto_click is on with no rate limit"),
+                };
+                let ms = wait.as_millis() as u64;
+                assert!((100..=130).contains(&ms), "p={p}: {ms} ms");
+            }
+        }
+    }
+
+    /// Off by default, and still gated on the auto click as a whole.
+    #[test]
+    fn a_miss_needs_the_auto_click_switched_on_at_all() {
+        assert_eq!(cfg().auto_click_miss_p, 0.0);
+        let mut r = StdRng::seed_from_u64(17);
+        let off = SmoothAim::new(
+            SmoothConfig {
+                auto_click: false,
+                auto_click_miss_p: 1.0,
+                ..cfg()
+            },
+            4_000_000,
+            1000.,
+        );
+        assert_eq!(plan_click(&off, &mut r), ClickPlan::None);
+    }
+
+    /// A probability outside [0, 1] is a typo, not a licence to misbehave.
+    #[test]
+    fn an_out_of_range_miss_probability_is_clamped() {
+        let mut r = StdRng::seed_from_u64(19);
+        for _ in 0..200 {
+            let high = SmoothAim::new(click_cfg(9.5), 4_000_000, 1000.);
+            assert!(matches!(plan_click(&high, &mut r), ClickPlan::Miss(_)));
+            let low = SmoothAim::new(click_cfg(-3.), 4_000_000, 1000.);
+            assert!(matches!(plan_click(&low, &mut r), ClickPlan::Settle(_)));
+        }
+    }
+
+    /// The rate limit outranks the miss roll: a refused click is no click,
+    /// whichever kind it was going to be.
+    #[test]
+    fn the_rate_limit_still_applies_to_a_miss() {
+        let mut r = StdRng::seed_from_u64(23);
+        let mut st = SmoothAim::new(
+            SmoothConfig {
+                auto_click_rate_limit_ms: 60_000,
+                ..click_cfg(1.0)
+            },
+            4_000_000,
+            1000.,
+        );
+        st.last_click = Some(Instant::now());
+        assert_eq!(plan_click(&st, &mut r), ClickPlan::None);
     }
 }

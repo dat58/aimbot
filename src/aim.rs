@@ -126,7 +126,7 @@ impl AimMode {
                         bbox.width() / 2.,
                     ))
                 } else if crosshair.y() > bbox.ymax() {
-                    let delta_y = random.random_range(0..11.min(bbox.height() as i32) + 1) as f32;
+                    let delta_y = random.random_range(0..6.min(bbox.height() as i32) + 1) as f32;
                     let y_rand = crosshair.y() - delta_y;
                     Some((
                         Point2f::new((bbox.xmin() + bbox.xmax()) / 2., y_rand),

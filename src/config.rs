@@ -1,3 +1,4 @@
+use crate::mouse_ab::AbConfig;
 use crate::stream::elgato::OutputFormat;
 use crate::stream::v4l2::parse_fourcc;
 use std::{env::var, path::PathBuf, time::Duration};
@@ -75,10 +76,8 @@ pub fn poll_hz_for_baud(baud: u32) -> u32 {
 /// Numeric tuning for the human-flick model behind
 /// [`crate::mouse::MouseVirtual::move_smooth`].
 ///
-/// Whether that model is used at all is not decided here. `MOVE_SMOOTH` picks
-/// it over `move_bezier` for the ordinary aim modes, and
-/// [`crate::aim::AimMode::aim_smooth`] — the ESP button 2 path — always uses
-/// it regardless.
+/// Which paths use it is not decided here: ESP button 2 does, and every other
+/// path goes through the neural model instead; see [`AbConfig`].
 #[derive(Debug, Clone, Copy)]
 pub struct SmoothConfig {
     /// Report cadence. `0` derives it from `MAKCU_BAUD`; see
@@ -130,9 +129,8 @@ pub struct SmoothConfig {
     pub max_counts: i64,
     /// Fire a left click once the flick has settled.
     ///
-    /// Only the `move_smooth` path does this. It fires after *every* flick, and
-    /// `move_smooth` is called once per frame while the trigger is held, so a
-    /// held trigger produces a click roughly every
+    /// Fires after *every* flick, and a flick is planned once per frame while
+    /// the trigger is held, so a held trigger produces a click roughly every
     /// `auto_click_lower_ms + hold` — a few per second, not one per target.
     pub auto_click: bool,
     /// Delay between the flick ending and the click, in milliseconds, drawn
@@ -328,12 +326,11 @@ pub struct Config {
     pub makcu_listen: bool,
     pub mouse_dpi: f64,
     pub game_sens: f64,
-    /// `MOVE_SMOOTH`: move through the human-flick model instead of the
-    /// firmware bezier in the ordinary aim modes. The ESP button 2 path uses
-    /// it whatever this says.
-    pub move_smooth: bool,
-    /// Tuning for the human-flick model; see [`SmoothConfig`].
+    /// Tuning for the human-flick model behind ESP button 2; see
+    /// [`SmoothConfig`].
     pub smooth: SmoothConfig,
+    /// Tuning for the neural model every other path uses; see [`AbConfig`].
+    pub ab: AbConfig,
 
     pub esp_port: Option<String>,
     pub default_aim_mode: Option<u8>,
@@ -527,10 +524,6 @@ impl Config {
         if !(mouse_dpi > 0.) {
             panic!("MOUSE_DPI must be greater than zero");
         }
-        let move_smooth = var("MOVE_SMOOTH")
-            .unwrap_or("false".to_string())
-            .parse::<bool>()
-            .expect("MOVE_SMOOTH is not a bool");
         let default_smooth = SmoothConfig::default();
         let smooth_f = |name: &str, default: f64| -> f64 {
             var(name)
@@ -593,6 +586,46 @@ impl Config {
                 default_smooth.counts_per_report,
             ),
             ..default_smooth
+        };
+        let default_ab = AbConfig::default();
+        let ab = AbConfig {
+            // No default: there is no sane guess for a game's FOV, and a wrong
+            // one silently mis-scales every stroke, so `AbAim::new` refuses it.
+            fov_deg: smooth_f("MOVE_AB_FOV_DEG", default_ab.fov_deg),
+            profile_path: var("MOVE_AB_PROFILE")
+                .map(std::path::PathBuf::from)
+                .unwrap_or(default_ab.profile_path.clone()),
+            model_dir: var("MOVE_AB_MODEL_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or(default_ab.model_dir.clone()),
+            max_stroke_ms: smooth_u64("MOVE_AB_MAX_STROKE_MS", default_ab.max_stroke_ms),
+            gain: smooth_f("MOVE_AB_GAIN", default_ab.gain),
+            overshoot_p: smooth_f("MOVE_AB_OVERSHOOT_P", default_ab.overshoot_p),
+            react_min_ms: smooth_u64("MOVE_AB_REACT_MIN_MS", default_ab.react_min_ms),
+            react_max_ms: smooth_u64("MOVE_AB_REACT_MAX_MS", default_ab.react_max_ms),
+            max_counts: smooth_u64("MOVE_AB_MAX_COUNTS", default_ab.max_counts as u64) as i64,
+            move_now: var("MOVE_AB_MOVE_NOW")
+                .unwrap_or(default_ab.move_now.to_string())
+                .parse::<bool>()
+                .expect("MOVE_AB_MOVE_NOW is not a bool"),
+            auto_click: var("MOVE_AB_AUTO_CLICK")
+                .unwrap_or(default_ab.auto_click.to_string())
+                .parse::<bool>()
+                .expect("MOVE_AB_AUTO_CLICK is not a bool"),
+            auto_click_lower_ms: smooth_u64(
+                "MOVE_AB_AUTO_CLICK_LOWER_MS",
+                default_ab.auto_click_lower_ms,
+            ),
+            auto_click_upper_ms: smooth_u64(
+                "MOVE_AB_AUTO_CLICK_UPPER_MS",
+                default_ab.auto_click_upper_ms,
+            ),
+            auto_click_miss_p: smooth_f("MOVE_AB_AUTO_CLICK_MISS_P", default_ab.auto_click_miss_p),
+            auto_click_rate_limit_ms: smooth_u64(
+                "MOVE_AB_AUTO_CLICK_RATE_LIMIT",
+                default_ab.auto_click_rate_limit_ms,
+            ),
+            ..default_ab
         };
         let esp_port = var("ESP_PORT").ok();
         // Compared against `dist`, which is a frame-pixel distance because
@@ -658,8 +691,8 @@ impl Config {
             makcu_listen,
             mouse_dpi,
             game_sens,
-            move_smooth,
             smooth,
+            ab,
             esp_port,
             fov,
             default_aim_mode,

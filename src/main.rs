@@ -7,6 +7,7 @@ use aimbot::{
     event::start_event_listener,
     model::{Bbox, Model, Point2f},
     mouse::{MouseVirtual, MoveRequest, SmoothAim, handle_mouse},
+    mouse_ab::AbAim,
     stream::{handle_capture, open_source},
 };
 use anyhow::{Result, anyhow};
@@ -208,11 +209,20 @@ fn main() -> Result<()> {
                 let queue = move_queue.clone();
                 let smooth =
                     SmoothAim::new(config.smooth, config.makcu_baud, config.mouse_dpi);
+                // Built here rather than lazily on the first flick: a mover
+                // that silently does nothing because a model directory is
+                // absent is far worse to diagnose than a refusal to start.
+                let ab = AbAim::new(
+                    config.ab.clone(),
+                    config.screen_width,
+                    config.game_sens,
+                    config.mouse_dpi,
+                )?;
                 let trigger = trigger.clone();
                 let button1 = esp_button1.clone();
                 let button2 = esp_button2.clone();
                 thread::spawn(move || {
-                    handle_mouse(mouse, queue, smooth, move || {
+                    handle_mouse(mouse, queue, smooth, ab, move || {
                         let use_trigger = trigger.load(Ordering::Acquire);
                         !use_trigger
                             || button1.load(Ordering::Acquire)
@@ -274,16 +284,16 @@ fn main() -> Result<()> {
                                         || esp_button2_pressed
                                         || mouse.is_side4_pressing()))
                                     || (!use_trigger);
-                                // aim_smooth (esp button 2) always moves like a
-                                // hand; the ordinary modes do when MOVE_SMOOTH
-                                // is on.
-                                let use_smooth = esp_button2_pressed || config.move_smooth;
                                 if fire {
                                     // Overwrites whatever the worker has not
                                     // started yet. A queued aim describes where
                                     // the target was a frame ago, so the newest
                                     // one is the only one worth playing.
-                                    move_queue.force_push(if use_smooth {
+                                    //
+                                    // ESP button 2 is the hand-crafted flick;
+                                    // every other way of firing goes through
+                                    // the neural model.
+                                    move_queue.force_push(if esp_button2_pressed {
                                         MoveRequest::Smooth {
                                             delta: (dx, dy),
                                             reach_px: dist * px_scale,
@@ -296,7 +306,7 @@ fn main() -> Result<()> {
                                             width_px: 2. * min_zone * px_scale,
                                         }
                                     } else {
-                                        MoveRequest::Bezier { delta: (dx, dy) }
+                                        MoveRequest::AbCurves { delta: (dx, dy) }
                                     });
                                 }
                             }

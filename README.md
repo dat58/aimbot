@@ -321,14 +321,15 @@ A mouse delta is played one of two ways:
 | Movement | What it is |
 | --- | --- |
 | `move_smooth` | The host plans a human flick and plays it as a stream of small `km.move` reports on a fixed cadence. |
-| `move_bezier` | The original single `km.move(dx,dy,steps,ref_x,ref_y)`, interpolated by the MAKCU firmware. |
+| `move_abcurves` | A neural model trained on real human mouse data ([abcurves-rs](https://github.com/dat58/abcurves-rs)) plans the stroke; the host plays its reports on the same 1 ms grid. |
+| `move_bezier` | The original single `km.move(dx,dy,steps,ref_x,ref_y)`, interpolated by the MAKCU firmware. No longer reachable from the aim loop. |
 
 ### Which one is used
 
 | Situation | Target chosen by | Movement |
 | --- | --- | --- |
 | ESP button 2 held | `aim_smooth` | **always** `move_smooth` |
-| Otherwise | the current aim mode | `move_smooth` when `MOVE_SMOOTH=true`, else `move_bezier` |
+| Everything else — ESP button 1, MAKCU side4, no-trigger auto aim | the current aim mode | **always** `move_abcurves` |
 
 `aim_smooth` chooses its target exactly like the Horizon mode: x goes straight
 to the centre of the box, while y is only nudged toward it a random amount each
@@ -336,11 +337,8 @@ frame instead of being snapped onto it — up to 21 px down when the crosshair i
 above the box, up to 11 px up toward a head box or 21 px toward a body box when
 it is below, and −14 to +7 px when it is already level with a body box. Level
 with a head box, it aims straight at the head. It
-ignores `MOVE_SMOOTH` — the hand-like movement is the point of that path — and
-uses `SCALE_MIN_ZONE2`.
-
-`MOVE_SMOOTH` defaults to `false`, so the ordinary modes keep the firmware
-bezier unless you opt in. It is read at startup; changing it needs a restart.
+uses `SCALE_MIN_ZONE2`. It is the one path that stays on the hand-written
+flick model; everything else goes through the neural one.
 
 ### What a flick models
 
@@ -505,8 +503,10 @@ re-reacts after every pause, not only on a new target.
 
 ### Auto click
 
-Fires a left click once a flick has been played. Only the `move_smooth` path
-does this, so with `MOVE_SMOOTH` unset that means ESP button 2 only. The click
+Fires a left click once a flick has been played. Both movers do this, each
+with its own `MOVE_SMOOTH_AUTO_CLICK_*` or `MOVE_AB_AUTO_CLICK_*` knobs and its
+own rate limit. A stroke that was cut short by its window never clicks — a shot
+behind an aim that has not arrived was not aimed. The click
 runs on the mouse worker thread, so the aim loop never blocks on it.
 
 | Variable | Default | Effect |
@@ -677,10 +677,10 @@ every strafing target.
    prompt to switch paths, and compare the planned duration with the measured
    one it prints. Measured consistently longer than planned means the host or
    the MAKCU cannot hold the cadence — lower `MOVE_SMOOTH_POLL_HZ`.
-4. **A/B in game.** Run with `MOVE_SMOOTH=false` and compare a normal shot
-   (bezier) with the same shot while holding ESP button 2 (always smooth) —
-   bearing in mind that button 2 also changes the target to the Horizon-style
-   one. For a like-for-like comparison, restart with `MOVE_SMOOTH=true`.
+4. **A/B in game.** Compare a normal shot (neural) with the same shot while
+   holding ESP button 2 (always the hand-written flick) — bearing in mind that
+   button 2 also changes the target to the Horizon-style one, so the two differ
+   in where they aim as well as how they get there.
 5. **Adjust one symptom at a time:**
 
    | Symptom | Change |
@@ -779,7 +779,6 @@ What each one does, how to compute its effect and presets by FOV are under
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `MOVE_SMOOTH` | `false` | Use `move_smooth` instead of `move_bezier` in the ordinary aim modes. ESP button 2 always uses it |
 | `MOVE_SMOOTH_POLL_HZ` | `0` | Report cadence; `0` derives it from `MAKCU_BAUD` |
 | `MOVE_SMOOTH_FITTS_A_MS` / `_B_MS` | `35` / `55` | Fitts intercept and slope, ms and ms per bit |
 | `MOVE_SMOOTH_MIN_MS` / `_MAX_MS` | `45` / `320` | Movement-time clamp |
@@ -797,6 +796,104 @@ What each one does, how to compute its effect and presets by FOV are under
 | `MOVE_SMOOTH_AUTO_CLICK_LOWER_MS` / `_UPPER_MS` | `100` / `130` | Wait between the flick and the click |
 | `MOVE_SMOOTH_AUTO_CLICK_RATE_LIMIT` | `0` | Smallest gap between two clicks, ms; `0` is no limit |
 | `MOVE_SMOOTH_AUTO_CLICK_MISS_P` | `0.0` | Chance the shot is fired without letting the aim settle |
+
+### Neural movement (abcurves)
+
+Used by every path except ESP button 2. abcurves owns the path — duration, the
+speed profile, curvature, tremor, how many reports a stroke is worth — so none
+of the `MOVE_SMOOTH_*` shape knobs have an equivalent here. What is carried over
+is everything that moves the *target* rather than the path.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MOVE_AB_FOV_DEG` | — | **Required.** The *game's* horizontal field of view, degrees. Not `FOV`, which is an engagement radius in frame pixels |
+| `MOVE_AB_PROFILE` | `assets/abcurves_profile.i16` | Renderer profile, exactly 256 reports of two little-endian `i16` |
+| `MOVE_AB_MODEL_DIR` | `assets/abcurves` | The 4.7 MB model directory from the abcurves repository |
+| `MOVE_AB_MAX_STROKE_MS` | `600` | Safety rail: abandon a stroke that never arrives. See below |
+| `MOVE_AB_GAIN` | `0.90` | Fraction of the distance one stroke commits to |
+| `MOVE_AB_OVERSHOOT_P` | `0.15` | Share of strokes that overshoot instead of falling short |
+| `MOVE_AB_REACT_MIN_MS` / `_MAX_MS` | `0` / `0` | Reaction latency on a fresh target |
+| `MOVE_AB_MAX_COUNTS` | `32767` | Per-report ceiling, effectively off |
+| `MOVE_AB_MOVE_NOW` | `false` | Emit `km.move_now`; probed at connect and ignored without it |
+| `MOVE_AB_AUTO_CLICK` | `false` | Click once a stroke has arrived |
+| `MOVE_AB_AUTO_CLICK_LOWER_MS` / `_UPPER_MS` | `100` / `130` | Wait between the stroke and the click |
+| `MOVE_AB_AUTO_CLICK_MISS_P` | `0.0` | Chance of firing without letting the aim settle |
+| `MOVE_AB_AUTO_CLICK_RATE_LIMIT` | `0` | Smallest gap between two clicks, ms |
+
+**`MOVE_AB_FOV_DEG` is required** because abcurves works in angles and nothing
+else in the configuration carries one: `GAME_SENS` and `MOUSE_DPI` relate pixels
+to counts, and only the FOV says how far the view turns.
+
+```
+rad_per_count = fov_rad × GAME_SENS × MOUSE_DPI / (SCREEN_WIDTH × 96)
+```
+
+At `SCREEN_WIDTH=2560`, `GAME_SENS=0.38`, `MOUSE_DPI=1000` and 103° that is
+`2.780e-3`, which is 7.9× the model's own reference of `3.509e-4` rad/count.
+The startup line prints both, and a multiple near 1 or near 100 means the FOV or
+the sensitivity is wrong.
+
+**Give it the horizontal one**, because that is what `SCREEN_WIDTH` pairs with.
+Games that only report a vertical FOV convert with the render aspect:
+
+```
+hfov = 2 × atan(aspect × tan(vfov / 2))
+```
+
+70.53° vertical at 16:9 is 103° horizontal. The two are worth computing both
+ways as a check: if the aspect they imply does not match `SCREEN_WIDTH /
+SCREEN_HEIGHT`, the game is letterboxing and the pixel deltas this reads off the
+capture do not span the FOV being quoted.
+
+The constant calibrates how large the model *thinks* a flick is, which is what
+makes its timing human; it is not an accuracy term. Aim accuracy is closed-loop
+— each frame asks for the counts still owed, converted in and back out through
+the same scale — so getting this wrong shows up as a stroke whose pace suits a
+different distance, not as a stroke that lands in the wrong place.
+
+**The stream is pumped, not cut into flicks.** `move_smooth` plans a whole flick
+and plays it, which blocks; abcurves is a *continuous* planner, so the worker
+instead advances it to the current microsecond on every turn of its loop and
+puts whatever fell due on the wire. A new aim calls `update_target` and the
+trajectory bends toward it mid-stroke — nothing is cancelled and nothing is
+restarted.
+
+This matters because the strokes are long and their reports are sparse: measured
+here, a 15-count stroke runs 110 ms and emits 20 non-zero reports out of 110,
+with runs of 17 zeros in the middle. Cutting that into blocking windows meant
+picking a window long enough to converge — 240 ms, below which small corrections
+stalled — and then not looking at the queue for that long. Pumping removes the
+choice. Measured on the MAKCU, a fresh aim reaches the wire in **2–8 ms** rather
+than up to a window, and the worker parks between samples instead of spinning:
+~330 turns per stroke, not 2.4 million.
+
+**`MOVE_AB_MAX_STROKE_MS` is a rail, not a tuning knob.** With the aim loop
+retargeting every frame, a stroke still running after 600 ms is a fault rather
+than a slow movement, so it is abandoned and the next frame starts over. Raising
+it will not improve tracking; if strokes are hitting it, the sensitivity
+derivation above is the thing to check.
+
+Verified on hardware: asks of 5, 15, 34 and 120 counts all converge, and a
+closed square of 40 counts a side returns to where it started with zero net
+drift — which is what confirms the sign convention and the `y_down` flip.
+
+Startup fails loudly and names the missing piece if the FOV is unset, the
+profile is absent or not 1024 bytes, or the model directory is missing.
+
+**The profile is a recording, not a calculation.** It is 256 consecutive 1 ms
+reports from a real mouse, which `RendererProfile::prepare` observes to build
+the renderer's starting hidden state. The shipped one is the abcurves
+repository's own, recorded at `8.008e-4` rad/count — a less sensitive device
+than this one, and the renderer works in native counts. That is a fidelity
+question rather than an accuracy one: the profile only seeds the stream, and
+aim is closed-loop.
+
+Recording one from your own mouse would need `km.axis`, and **this MAKCU build
+does not have it**: `km.version()` and `km.buttons(1)` are echoed, while
+`km.axis`, `km.mouse` and `km.getpos` draw no reply at all — which is how the
+firmware reports a command it does not know. The published API lists `km.axis`
+under V3.x, but this build, the same one that has no `km.move_now`, does not
+carry it. So the shipped profile is the one to use.
 
 Capture-card variables are in
 [Capture from a capture card](#capture-from-a-capture-card).

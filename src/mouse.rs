@@ -1,4 +1,5 @@
 use crate::config::{SmoothConfig, poll_hz_for_baud};
+use crate::mouse_ab::{AbAim, Pumped};
 use anyhow::{Result, bail};
 use crossbeam::queue::ArrayQueue;
 use rand::prelude::*;
@@ -206,9 +207,12 @@ impl MouseVirtual {
         width_px: f32,
         random: &mut impl Rng,
         keep_going: impl Fn() -> bool,
-    ) -> Result<()> {
+    ) -> Result<Played> {
+        // `Nothing` rather than `Ok(())`: a request that planned no flick never
+        // moved the mouse, and until this distinction existed the worker ran
+        // the whole click pipeline behind it and fired an unaimed shot.
         let Some(flick) = plan_flick(smooth, delta, reach_px, width_px, random) else {
-            return Ok(());
+            return Ok(Played::Nothing);
         };
         // The count budget is what decides whether this still looks like a
         // hand: below roughly one count per report the profile degenerates into
@@ -223,7 +227,8 @@ impl MouseVirtual {
             reach_px,
             width_px,
         );
-        self.play_flick(&flick, &keep_going)
+        self.play_flick(&flick, &keep_going)?;
+        Ok(Played::Smooth)
     }
 
     /// Play a flick planned by [`plan_flick`], one `km.move` per report
@@ -237,15 +242,23 @@ impl MouseVirtual {
     /// `keep_going` is checked once per report, because the alternative is not
     /// re-reading the trigger for the length of the movement. A hand abandons a
     /// flick when the reason for it goes away, so this does too.
-    pub fn play_flick(&self, flick: &Flick, keep_going: impl Fn() -> bool) -> Result<()> {
-        // `km.move` is interpolated by V4.028+ firmware over 4-42 ms. Every
-        // report here is already placed on its own deadline, so that second
-        // layer would smear the profile and queue commands behind each other.
-        let verb = if flick.move_now && self.move_now.load(Ordering::Acquire) {
+    /// Put one report on the wire.
+    ///
+    /// `km.move` is interpolated by V4.028+ firmware over 4-42 ms. Both movers
+    /// already place every report on its own deadline, so that second layer
+    /// would only smear the profile and queue commands behind each other —
+    /// hence `prefer_now`, which is honoured when the firmware has the command
+    /// at all.
+    pub fn emit_move(&self, dx: i64, dy: i64, prefer_now: bool) -> Result<()> {
+        let verb = if prefer_now && self.move_now.load(Ordering::Acquire) {
             "km.move_now"
         } else {
             "km.move"
         };
+        self.cmd(format!("{verb}({dx},{dy})").as_str())
+    }
+
+    pub fn play_flick(&self, flick: &Flick, keep_going: impl Fn() -> bool) -> Result<()> {
         let start = Instant::now();
         let last = flick.steps.len().saturating_sub(1);
         let (mut dx, mut dy) = (0i64, 0i64);
@@ -268,7 +281,7 @@ impl MouseVirtual {
             // elsewhere. The deadline was still honoured, so the slow head and
             // the long tail of the profile keep their shape.
             if (dx, dy) != (0, 0) {
-                self.cmd(format!("{verb}({dx},{dy})").as_str())?;
+                self.emit_move(dx, dy, flick.move_now)?;
                 dx = 0;
                 dy = 0;
             }
@@ -694,8 +707,29 @@ pub enum MoveRequest {
         reach_px: f32,
         width_px: f32,
     },
+    /// Play the neural model, and the auto click behind it if configured.
+    ///
+    /// No `reach_px`/`width_px`: those exist only because Fitts needs the
+    /// visual difficulty of the shot, and abcurves does not.
+    AbCurves { delta: (f64, f64) },
     /// Hand the whole delta to the firmware in one command.
     Bezier { delta: (f64, f64) },
+}
+
+/// What one request did, which is what decides whether a click follows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Played {
+    /// Nothing was planned: a zero or non-finite delta, or a request that
+    /// arrived inside the reaction window. The mouse never moved, so there is
+    /// nothing to shoot at.
+    Nothing,
+    /// A human flick, planned to its own endpoint by construction.
+    Smooth,
+    /// A neural stroke that ran to its end.
+    AbArrived,
+    /// A neural stroke cut short by its window. The aim has not arrived, so a
+    /// shot behind it would not have been aimed.
+    AbCapped,
 }
 
 /// Drain `queue` and drive the mouse, forever.
@@ -715,83 +749,149 @@ pub fn handle_mouse(
     mouse: Arc<MouseVirtual>,
     queue: Arc<ArrayQueue<MoveRequest>>,
     mut smooth: SmoothAim,
+    mut ab: AbAim,
     keep_going: impl Fn() -> bool,
 ) {
     let mut random = rand::rng();
+    let mut pending = Pending::None;
     loop {
-        let Some(request) = queue.pop() else {
-            sleep(IDLE_POLL);
-            continue;
-        };
-        let smooth_move = matches!(request, MoveRequest::Smooth { .. });
-        play_request(&mouse, &mut smooth, &mut random, &keep_going, request);
-        // Only the human-flick path clicks; a bezier move is the plain path and
-        // was never part of this.
-        if !smooth_move {
+        // A click that has come due. The trigger is re-read first: the wait is
+        // long enough to be let go inside, and firing after that is a shot
+        // nobody asked for.
+        if let Some(who) = pending.due(Instant::now()) {
+            pending = Pending::None;
+            if keep_going() {
+                // Stamped at the press, not after the release: the rate limit
+                // is a gap between clicks and `click_left` holds the button for
+                // tens of milliseconds, which would otherwise be added to every
+                // gap.
+                let pressed_at = Instant::now();
+                match mouse.click_left(&mut random) {
+                    Ok(()) => match who {
+                        Who::Smooth => smooth.set_last_click(pressed_at),
+                        Who::AbCurves => ab.set_last_click(pressed_at),
+                    },
+                    Err(e) => tracing::error!("[Mouse] {}", e),
+                }
+            }
             continue;
         }
 
-        let until = match plan_click(&smooth, &mut random) {
-            ClickPlan::None => continue,
-            // Hold still: whatever the flick got wrong is what the shot carries.
-            ClickPlan::Miss(wait) => {
-                tracing::debug!("[Smooth] auto click after {wait:?}, holding still (miss)");
-                sleep(wait);
-                None
-            }
-            // Keep taking aim: the corrections still arriving get played inside
-            // the wait, so the crosshair is on target by the time it fires.
-            ClickPlan::Settle(wait) => {
-                tracing::debug!("[Smooth] auto click after {wait:?}, still tracking (hit)");
-                Some(Instant::now() + wait)
-            }
-        };
-        if let Some(deadline) = until {
-            while Instant::now() < deadline {
-                match queue.pop() {
-                    Some(request) => {
-                        play_request(&mouse, &mut smooth, &mut random, &keep_going, request)
+        // Holding still for a deliberate miss: the crosshair keeps whatever the
+        // stroke got wrong, so nothing may touch the mouse until it fires.
+        if pending.is_hold() {
+            sleep(IDLE_POLL);
+            continue;
+        }
+
+        if let Some(request) = queue.pop() {
+            match request {
+                MoveRequest::Smooth {
+                    delta,
+                    reach_px,
+                    width_px,
+                } => {
+                    // The hand-written flick is planned whole and played whole,
+                    // so it blocks. ESP button 2 only.
+                    match mouse.move_smooth(
+                        &mut smooth,
+                        delta,
+                        reach_px,
+                        width_px,
+                        &mut random,
+                        &keep_going,
+                    ) {
+                        Ok(Played::Smooth) => {
+                            pending = Pending::arm(plan_click(&smooth, &mut random), Who::Smooth);
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::error!("[Mouse] {}", e),
                     }
-                    None => sleep(IDLE_POLL),
+                    continue;
+                }
+                // Lands within a sample rather than waiting out whatever was
+                // already planned, which is the whole point of a continuous
+                // planner.
+                MoveRequest::AbCurves { delta } => {
+                    ab.retarget(delta, &mut random);
+                }
+                MoveRequest::Bezier { delta } => {
+                    if let Err(e) = mouse.move_bezier(delta.0, delta.1, &mut random) {
+                        tracing::error!("[Mouse] {}", e);
+                    }
                 }
             }
         }
 
-        // Re-read the trigger: the wait is long enough to be let go inside, and
-        // firing after that is a shot nobody asked for.
-        if !keep_going() {
-            continue;
-        }
-        // Stamped at the press, not after the release: the rate limit is a gap
-        // between clicks and `click_left` holds the button for tens of
-        // milliseconds, which would otherwise be added to every gap.
-        let pressed_at = Instant::now();
-        match mouse.click_left(&mut random) {
-            Ok(()) => smooth.last_click = Some(pressed_at),
-            Err(e) => tracing::error!("[Mouse] {}", e),
+        match ab.pump(&mouse, &keep_going) {
+            // Nothing to drive. Park rather than spin a core on an idle queue.
+            Pumped::Idle => sleep(IDLE_POLL),
+            // Mid-stroke. Park until the next sample is due rather than
+            // spinning a core for the length of the movement, but never past
+            // the idle poll, so a fresh aim is still picked up as promptly as
+            // it would be from rest.
+            Pumped::Moving => sleep(ab.due_in().min(IDLE_POLL)),
+            Pumped::Arrived => {
+                pending = Pending::arm(plan_click(&ab, &mut random), Who::AbCurves);
+            }
         }
     }
 }
 
-/// Play one request. A failed command is one lost aim, not a reason to stop
-/// aiming: the next frame plans afresh from wherever the crosshair actually is.
-fn play_request<F: Fn() -> bool>(
-    mouse: &MouseVirtual,
-    smooth: &mut SmoothAim,
-    random: &mut rand::rngs::ThreadRng,
-    keep_going: &F,
-    request: MoveRequest,
-) {
-    let result = match request {
-        MoveRequest::Smooth {
-            delta,
-            reach_px,
-            width_px,
-        } => mouse.move_smooth(smooth, delta, reach_px, width_px, random, keep_going),
-        MoveRequest::Bezier { delta } => mouse.move_bezier(delta.0, delta.1, random),
-    };
-    if let Err(e) = result {
-        tracing::error!("[Mouse] {}", e);
+/// Which mover a pending click belongs to, so its own rate limit is the one
+/// that gets stamped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Who {
+    Smooth,
+    AbCurves,
+}
+
+/// A click that has been decided on but has not fired yet.
+///
+/// Held as state rather than slept through inside a sub-loop, because the
+/// neural stream has to keep being pumped during the wait — that is exactly
+/// what separates a hit from a miss. `Track` keeps aiming, `Hold` does not.
+#[derive(Debug, Clone, Copy)]
+enum Pending {
+    None,
+    /// Hold still until this instant: the shot carries the ballistic error.
+    Hold { until: Instant, who: Who },
+    /// Keep taking aim until this instant: the corrections land first.
+    Track { until: Instant, who: Who },
+}
+
+impl Pending {
+    fn arm(plan: ClickPlan, who: Who) -> Self {
+        match plan {
+            ClickPlan::None => Pending::None,
+            ClickPlan::Miss(wait) => {
+                tracing::debug!("[Mouse] auto click in {wait:?}, holding still (miss)");
+                Pending::Hold {
+                    until: Instant::now() + wait,
+                    who,
+                }
+            }
+            ClickPlan::Settle(wait) => {
+                tracing::debug!("[Mouse] auto click in {wait:?}, still tracking (hit)");
+                Pending::Track {
+                    until: Instant::now() + wait,
+                    who,
+                }
+            }
+        }
+    }
+
+    fn is_hold(&self) -> bool {
+        matches!(self, Pending::Hold { .. })
+    }
+
+    fn due(&self, now: Instant) -> Option<Who> {
+        match *self {
+            Pending::None => None,
+            Pending::Hold { until, who } | Pending::Track { until, who } => {
+                (now >= until).then_some(who)
+            }
+        }
     }
 }
 
@@ -818,26 +918,65 @@ pub enum ClickPlan {
 /// corrections that are still arriving, and only the worker holds the queue
 /// they arrive on. Keeping it out of `move_smooth` also stops those correction
 /// flicks from each planning a click of their own.
-pub fn plan_click(state: &SmoothAim, random: &mut impl Rng) -> ClickPlan {
-    let cfg = state.cfg;
+pub fn plan_click(state: &impl AutoClick, random: &mut impl Rng) -> ClickPlan {
+    let cfg = state.click_cfg();
     if !cfg.auto_click {
         return ClickPlan::None;
     }
-    let wait = auto_click_delay(cfg.auto_click_lower_ms, cfg.auto_click_upper_ms, random);
+    let wait = auto_click_delay(cfg.lower_ms, cfg.upper_ms, random);
     // Asked before the wait, so a click the limit would refuse costs no time at
     // all and the worker goes straight back to tracking.
     if !click_allowed(
-        state.last_click,
+        state.last_click(),
         Instant::now(),
         wait,
-        cfg.auto_click_rate_limit_ms,
+        cfg.rate_limit_ms,
     ) {
         return ClickPlan::None;
     }
-    if random.random::<f64>() < cfg.auto_click_miss_p.clamp(0., 1.) {
+    if random.random::<f64>() < cfg.miss_p.clamp(0., 1.) {
         ClickPlan::Miss(wait)
     } else {
         ClickPlan::Settle(wait)
+    }
+}
+
+/// The five knobs and one timestamp the auto click needs.
+///
+/// Nothing in here says how the mouse got where it is, which is exactly why
+/// both movers can feed one click pipeline instead of each growing their own.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClickCfg {
+    pub auto_click: bool,
+    pub lower_ms: u64,
+    pub upper_ms: u64,
+    pub miss_p: f64,
+    pub rate_limit_ms: u64,
+}
+
+/// Implemented by every mover, so [`plan_click`] and the rate limit are written
+/// once.
+pub trait AutoClick {
+    fn click_cfg(&self) -> ClickCfg;
+    fn last_click(&self) -> Option<Instant>;
+    fn set_last_click(&mut self, at: Instant);
+}
+
+impl AutoClick for SmoothAim {
+    fn click_cfg(&self) -> ClickCfg {
+        ClickCfg {
+            auto_click: self.cfg.auto_click,
+            lower_ms: self.cfg.auto_click_lower_ms,
+            upper_ms: self.cfg.auto_click_upper_ms,
+            miss_p: self.cfg.auto_click_miss_p,
+            rate_limit_ms: self.cfg.auto_click_rate_limit_ms,
+        }
+    }
+    fn last_click(&self) -> Option<Instant> {
+        self.last_click
+    }
+    fn set_last_click(&mut self, at: Instant) {
+        self.last_click = Some(at);
     }
 }
 
@@ -868,10 +1007,44 @@ pub fn auto_click_delay(lower_ms: u64, upper_ms: u64, random: &mut impl Rng) -> 
     })
 }
 
+/// Is the hand allowed to start moving yet, and was the pause long enough that
+/// leftover state belongs to a target that is gone?
+///
+/// Nothing in the pipeline carries a target id, so a fresh acquisition is
+/// inferred from silence. Shared by both movers so the two cannot drift apart
+/// on what counts as a fresh target; each then cleans up its own leftovers.
+///
+/// `None` means the reaction window has not elapsed. `Some(stale)` means move.
+pub(crate) fn gate_reaction(
+    last_flick: Option<Instant>,
+    ready_at: &mut Option<Instant>,
+    gap_ms: u64,
+    react: (u64, u64),
+    now: Instant,
+    random: &mut impl Rng,
+) -> Option<bool> {
+    let gap = Duration::from_millis(gap_ms);
+    let stale = last_flick.is_none_or(|end| now.saturating_duration_since(end) > gap);
+    if stale && ready_at.is_none() {
+        let (lo, hi) = (react.0.min(react.1), react.0.max(react.1));
+        if hi > 0 {
+            let wait = lo + ((hi - lo) as f64 * random.random::<f64>()).round() as u64;
+            *ready_at = Some(now + Duration::from_millis(wait));
+        }
+    }
+    if let Some(ready) = *ready_at {
+        if now < ready {
+            return None;
+        }
+        *ready_at = None;
+    }
+    Some(stale)
+}
+
 /// One standard normal from two uniforms (Box-Muller). `rand` carries no
 /// normal distribution of its own and `rand_distr` is not worth a dependency
 /// for six lines.
-fn gauss(random: &mut impl Rng) -> f64 {
+pub(crate) fn gauss(random: &mut impl Rng) -> f64 {
     // `random::<f64>()` is [0, 1), and `ln(0)` would poison the whole plan
     // with NaN.
     let u1 = random.random::<f64>().max(f64::MIN_POSITIVE);
@@ -881,7 +1054,7 @@ fn gauss(random: &mut impl Rng) -> f64 {
 
 /// Uniform on `[lo, hi]`, total where `random_range` is not: that one panics
 /// on an empty range, which is the bug commit 996fcf9 had to go back and fix.
-fn uniform(random: &mut impl Rng, lo: f64, hi: f64) -> f64 {
+pub(crate) fn uniform(random: &mut impl Rng, lo: f64, hi: f64) -> f64 {
     lo + (hi - lo) * random.random::<f64>()
 }
 
@@ -964,29 +1137,18 @@ pub fn plan_flick_at(
     }
     let cfg = state.cfg;
 
-    // Nothing in the pipeline carries a target id, so a fresh acquisition is
-    // inferred from silence: if nothing was aimed at for a while, the leftover
-    // fraction describes a move toward a target that no longer exists.
-    let gap = Duration::from_millis(cfg.gap_ms);
-    let stale = state
-        .last_flick
-        .is_none_or(|end| now.saturating_duration_since(end) > gap);
-    if stale && state.ready_at.is_none() {
+    // `None` means still watching: the hand has not started yet.
+    let stale = gate_reaction(
+        state.last_flick,
+        &mut state.ready_at,
+        cfg.gap_ms,
+        (cfg.react_min_ms, cfg.react_max_ms),
+        now,
+        random,
+    )?;
+    if stale {
+        // The leftover fraction describes a move toward a target that is gone.
         state.carry = (0., 0.);
-        let (lo, hi) = (
-            cfg.react_min_ms.min(cfg.react_max_ms),
-            cfg.react_min_ms.max(cfg.react_max_ms),
-        );
-        if hi > 0 {
-            let wait = lo + ((hi - lo) as f64 * random.random::<f64>()).round() as u64;
-            state.ready_at = Some(now + Duration::from_millis(wait));
-        }
-    }
-    if let Some(ready) = state.ready_at {
-        if now < ready {
-            return None; // still watching; the hand has not started yet
-        }
-        state.ready_at = None;
     }
 
     // Woodworth: a ballistic reach stops short on purpose, because overshooting

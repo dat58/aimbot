@@ -810,8 +810,8 @@ is everything that moves the *target* rather than the path.
 | `MOVE_AB_PROFILE` | `assets/abcurves_profile.i16` | Renderer profile, exactly 256 reports of two little-endian `i16` |
 | `MOVE_AB_MODEL_DIR` | `assets/abcurves` | The 4.7 MB model directory from the abcurves repository |
 | `MOVE_AB_MAX_STROKE_MS` | `600` | Safety rail: abandon a stroke that never arrives. See below |
-| `MOVE_AB_GAIN` | `0.90` | Fraction of the distance one stroke commits to |
-| `MOVE_AB_OVERSHOOT_P` | `0.15` | Share of strokes that overshoot instead of falling short |
+| `MOVE_AB_GAIN` | `1.0` | Fraction of the remaining distance aimed at when a reach begins. Mostly a closing-rate knob |
+| `MOVE_AB_OVERSHOOT_P` | `0.15` | Chance a reach overshoots and has to come back. See below |
 | `MOVE_AB_REACT_MIN_MS` / `_MAX_MS` | `0` / `0` | Reaction latency on a fresh target |
 | `MOVE_AB_MAX_COUNTS` | `32767` | Per-report ceiling, effectively off |
 | `MOVE_AB_MOVE_NOW` | `false` | Emit `km.move_now`; probed at connect and ignored without it |
@@ -866,6 +866,50 @@ stalled — and then not looking at the queue for that long. Pumping removes the
 choice. Measured on the MAKCU, a fresh aim reaches the wire in **2–8 ms** rather
 than up to a window, and the worker parks between samples instead of spinning:
 ~330 turns per stroke, not 2.4 million.
+
+**Everything the gain and the overshoot touch is per *reach*, not per frame.**
+The aim loop retargets every 7 ms, so anything reset on each call is destroyed
+by the next one. Three things used to be, and all three were bugs:
+
+| Reset per frame | What it broke |
+| --- | --- |
+| The ballistic gain | Re-rolled every 7 ms, so an overshoot was cancelled before it could happen — `MOVE_AB_OVERSHOOT_P` did nothing |
+| `settle` | The rest detector never counted its 32 consecutive zero reports |
+| The stuck-stroke clock | `MOVE_AB_MAX_STROKE_MS` could never fire |
+
+With the last two dead together, a reach that came to rest a fraction of a count
+short had no way to end at all: the pump sat emitting nothing and the auto click
+never armed. Measured as a **2255 ms dead gap inside a 2714 ms** tracking run,
+now 193 ms end to end.
+
+**How the two movers actually compare.** Measured with no MAKCU attached, by
+reading `plan_flick`'s schedule and driving `AbAim::step`:
+
+| Ask | `move_smooth` | abcurves | gap median / max |
+| --- | --- | --- | --- |
+| 35, 35 counts (196 px) | 90 ms, gaps flat at 3.3 ms | 193 ms | 2.1 ms / 12.5 ms |
+| 8.8, 8.8 counts (49 px) | 19 ms, gaps flat at 3.1 ms | 269 ms | 5.4 ms / 21.5 ms |
+
+So abcurves does **not** insert long waits between reports — its gaps are a few
+milliseconds, same order as `move_smooth`'s fixed poll interval. It is simply
+slower end to end, and the gap widens as the ask shrinks: roughly 2x on a
+200 px flick and over 10x on a 50 px correction. That is the model, not a bug.
+abcurves is a human movement model and a human correction takes 150-250 ms
+however small it is. If an engagement has to be quicker than that, `move_smooth`
+is the mover with explicit `MIN_MS` / `MAX_MS` / speed knobs; abcurves
+deliberately has none.
+
+**`MOVE_AB_OVERSHOOT_P` works, and it is additive.** Over 40 reaches of 60
+counts, counting those that carried the pointer past the target:
+
+| `MOVE_AB_OVERSHOOT_P` | Reaches that overshot | Furthest |
+| --- | --- | --- |
+| 0.0 | 42% | 1.23x the ask |
+| 0.5 | 48% | 1.38x |
+| 1.0 | 62% | 1.57x |
+
+The 42% floor is abcurves' own endpoint spread — the knob adds to it rather than
+creating it, which is why no setting reaches 0% or 100%.
 
 **`MOVE_AB_MAX_STROKE_MS` is a rail, not a tuning knob.** With the aim loop
 retargeting every frame, a stroke still running after 600 ms is a fault rather

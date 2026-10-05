@@ -65,11 +65,26 @@ pub struct AbConfig {
     /// rather than a slow movement — measured strokes run 110-200 ms. It exists
     /// so a wedged planner cannot hold the auto click off forever.
     pub max_stroke_ms: u64,
-    /// Fraction of the distance one flick commits to; the rest is left for the
-    /// next frame's correction. Same meaning as the `move_smooth` knob.
+    /// Fraction of the *remaining* distance the planner is pointed at when a
+    /// reach begins, held for that reach.
+    ///
+    /// The aim loop re-measures every frame, so anything below 1 mostly damps
+    /// how fast the loop closes rather than leaving a lasting undershoot;
+    /// 1.0 is the fastest. The ballistic character comes from
+    /// [`AbConfig::overshoot_p`] instead, which does leave the pointer past
+    /// the target often enough to need a correction back.
     pub gain: f64,
     pub gain_sd: f64,
     /// How often a flick overshoots instead of falling short.
+    /// Chance a reach is rolled with a gain above 1, so it carries the pointer
+    /// past the target and the next reach has to come back.
+    ///
+    /// Only works because the gain is latched for the reach: re-rolling it per
+    /// frame cancelled every overshoot 7 ms later, which is what once made
+    /// this knob look inert. Measured over 40 reaches of 60 counts, counting
+    /// those that crossed the target: 42% at 0.0, 48% at 0.5, 62% at 1.0, with
+    /// the furthest going 1.23x, 1.38x and 1.57x the ask. The 42% floor is
+    /// abcurves' own endpoint spread — this adds to it rather than creating it.
     pub overshoot_p: f64,
     pub react_min_ms: u64,
     pub react_max_ms: u64,
@@ -98,7 +113,9 @@ impl Default for AbConfig {
             profile_path: PathBuf::from("assets/abcurves_profile.i16"),
             model_dir: PathBuf::from("assets/abcurves"),
             max_stroke_ms: 600,
-            gain: 0.90,
+            // 1.0 closes the loop as fast as the model allows. Lower only
+            // damps it; see `gain_sets_the_closing_rate_not_the_endpoint`.
+            gain: 1.0,
             gain_sd: 0.045,
             overshoot_p: 0.15,
             react_min_ms: 0,
@@ -133,6 +150,8 @@ pub struct AbAim {
     target: Option<[f64; 2]>,
     /// When the current target was set, for the stuck-stroke bound.
     started: Option<Instant>,
+    /// The ballistic gain this reach was rolled with, held for its duration.
+    gain: f64,
     settle: Settle,
 }
 
@@ -227,6 +246,7 @@ impl AbAim {
             last_click: None,
             target: None,
             started: None,
+            gain: 1.,
             settle: Settle::default(),
         })
     }
@@ -354,6 +374,32 @@ impl Settle {
     }
 }
 
+/// Roll the Woodworth gain for one reach.
+///
+/// `move_smooth` plans a flick whole, so it draws this once per flick: a
+/// ballistic movement stops short on purpose, and the minority that overshoot
+/// are what put a direction reversal in the next correction.
+///
+/// Pumping made it easy to draw per *frame* instead, which is a different and
+/// much worse thing. Re-anchoring on `rendered_xy` with a fixed gain is fine —
+/// the target converges on 90% of the reach, which is the undershoot working
+/// as intended. Re-rolling it is not: with `overshoot_p` at 0.15 the target
+/// jumps between `0.9r` and `1.06r` every 7 ms, so the planner is handed a
+/// destination that never holds still and can never commit to a reach. On
+/// hardware that showed up as 5 counts taking 587 ms over 83 retargets while
+/// 120 counts took 489 ms over 69 — a small correction slower than a long
+/// flick, which is backwards.
+///
+/// So the caller rolls this when a reach begins and holds it until the reach
+/// ends, which is the granularity `move_smooth` has always applied it at.
+fn reach_gain(cfg: &AbConfig, random: &mut impl Rng) -> f64 {
+    if random.random::<f64>() < cfg.overshoot_p {
+        (1.06 + 0.04 * gauss(random).clamp(-3., 3.)).clamp(1., 1.25)
+    } else {
+        (cfg.gain + cfg.gain_sd * gauss(random).clamp(-3., 3.)).clamp(0.05, 1.05)
+    }
+}
+
 /// Where a relative ask lands, absolutely.
 ///
 /// `from` and the result are common units, `delta` is mouse counts, and
@@ -406,15 +452,18 @@ impl AbAim {
             return false;
         };
 
-        // Woodworth, exactly as in `move_smooth`: a ballistic reach stops short
-        // on purpose, and the minority that overshoot are what put a direction
-        // reversal in the next correction. This moves the *target*, so it sits
-        // outside the model rather than fighting it.
-        let gain = if random.random::<f64>() < cfg.overshoot_p {
-            (1.06 + 0.04 * gauss(random).clamp(-3., 3.)).clamp(1., 1.25)
-        } else {
-            (cfg.gain + cfg.gain_sd * gauss(random).clamp(-3., 3.)).clamp(0.05, 1.05)
-        };
+        // Everything below belongs to the *reach*, not to the frame. The aim
+        // loop retargets every 7 ms, so resetting any of it per call destroys
+        // it: the rest detector never counts 32 zeros in a row, and the
+        // stuck-stroke clock never reaches its bound. A reach that came to
+        // rest a fraction of a count short then had no way at all to end, and
+        // the pump sat emitting nothing — measured as a 2255 ms dead gap in
+        // the middle of a 2714 ms tracking run.
+        let fresh = self.target.is_none();
+        if fresh {
+            self.gain = reach_gain(cfg, random);
+        }
+        let gain = self.gain;
 
         // Anchored on where the emitted counts actually put the cursor, not on
         // `current_xy()` — that is the planner's ideal position and leads the
@@ -430,8 +479,10 @@ impl AbAim {
         }
         self.planned_us = ts;
         self.target = Some(target);
-        self.started = Some(now);
-        self.settle = Settle::default();
+        if fresh {
+            self.started = Some(now);
+            self.settle = Settle::default();
+        }
         self.last_flick = Some(now);
         true
     }
@@ -474,26 +525,42 @@ impl AbAim {
     /// elsewhere several samples come back at once and are coalesced into one
     /// command, the same way `play_flick` folds a late report into the next.
     pub fn pump(&mut self, mouse: &MouseVirtual, keep_going: &impl Fn() -> bool) -> Pumped {
+        let (state, (dx, dy)) = self.step(keep_going);
+        if (dx, dy) != (0, 0) {
+            if let Err(e) = mouse.emit_move(dx, dy, self.cfg.move_now) {
+                tracing::error!("[AbCurves] {e}");
+            }
+        }
+        state
+    }
+
+    /// Decide what this turn owes the wire, without touching it.
+    ///
+    /// Split out of [`Self::pump`] so the whole mover can be driven with no
+    /// MAKCU attached: the counts and the millisecond they fall on are the
+    /// interesting part, and a serial port contributes nothing to a test.
+    pub fn step(&mut self, keep_going: &impl Fn() -> bool) -> (Pumped, (i64, i64)) {
+        const NOTHING: (i64, i64) = (0, 0);
         let Some(target) = self.target else {
-            return Pumped::Idle;
+            return (Pumped::Idle, NOTHING);
         };
         // A stroke is abandoned when the reason for it goes away, exactly as
         // `play_flick` abandons one between reports.
         if !keep_going() {
             self.release();
-            return Pumped::Idle;
+            return (Pumped::Idle, NOTHING);
         }
 
         let now_us = self.origin.elapsed().as_micros() as i64;
         if now_us < self.planned_us + SAMPLE_US {
-            return Pumped::Moving; // not due yet
+            return (Pumped::Moving, NOTHING); // not due yet
         }
         let advance = match self.pipeline.advance(now_us) {
             Ok(advance) => advance,
             Err(e) => {
                 self.recover(&format!("advance failed: {e}"));
                 self.release();
-                return Pumped::Idle;
+                return (Pumped::Idle, NOTHING);
             }
         };
         self.planned_us = now_us;
@@ -505,12 +572,7 @@ impl AbAim {
             dx += report[0] as i64;
             dy += report[1] as i64;
         }
-        if (dx, dy) != (0, 0) {
-            let (dx, dy) = (dx.clamp(-cap, cap), dy.clamp(-cap, cap));
-            if let Err(e) = mouse.emit_move(dx, dy, self.cfg.move_now) {
-                tracing::error!("[AbCurves] {e}");
-            }
-        }
+        let owed = (dx.clamp(-cap, cap), dy.clamp(-cap, cap));
 
         let rendered = self.pipeline.rendered_xy();
         let left = [
@@ -529,9 +591,9 @@ impl AbAim {
             }
             self.release();
             self.last_flick = Some(Instant::now());
-            return Pumped::Arrived;
+            return (Pumped::Arrived, owed);
         }
-        Pumped::Moving
+        (Pumped::Moving, owed)
     }
 }
 
@@ -638,17 +700,22 @@ mod tests {
         );
     }
 
-    /// Gain is the Woodworth undershoot, and it has to reach the target rather
-    /// than the path — scaling the ask is what keeps it outside the model.
+    fn tuned() -> AbConfig {
+        AbConfig {
+            gain: 0.9,
+            overshoot_p: 0.15,
+            ..Default::default()
+        }
+    }
+
+    /// The undershoot has to survive, or corrections stop reversing direction
+    /// and the movement reads as a machine servoing onto a point.
     #[test]
-    fn gain_shortens_the_ask_and_nothing_else() {
-        let scale = [2., -2.];
-        let full = target_from([0., 0.], (100., 0.), 1., scale);
-        let short = target_from([0., 0.], (100., 0.), 0.9, scale);
-        assert_eq!(full, [200., 0.]);
-        assert_eq!(short, [180., 0.], "90% of the reach, measured on the wire");
-        // Which is what the hardware bench sees: 12 counts asked, 10 emitted.
-        assert_eq!(target_from([0., 0.], (12., 0.), 0.9, [1., -1.])[0].round(), 11.);
+    fn a_reach_still_falls_short_on_average() {
+        let mut r = rand::rng();
+        let cfg = tuned();
+        let mean: f64 = (0..4000).map(|_| reach_gain(&cfg, &mut r)).sum::<f64>() / 4000.;
+        assert!(mean > 0.88 && mean < 0.98, "mean reach gain {mean}");
     }
 
     /// Below the integer grid nothing further could move the pointer, so this

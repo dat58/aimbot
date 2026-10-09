@@ -187,24 +187,6 @@ impl AimMode {
             },
         }
     }
-
-    /// Where ESP button 2 aims. Target selection is exactly
-    /// [`Self::aim_horizon`]'s: x goes straight to the centre of the box, and y
-    /// is nudged a few pixels at a time toward it rather than snapped onto it.
-    ///
-    /// What sets it apart is how the mouse gets there: the caller always plays
-    /// it through [`crate::mouse::MouseVirtual::move_smooth`], whatever
-    /// `MOVE_SMOOTH` says, because the hand-like movement is the point of this
-    /// path.
-    #[inline(always)]
-    pub fn aim_smooth(
-        &self,
-        bboxes: &Bboxes,
-        crosshair: &Point2f,
-        random: &mut ThreadRng,
-    ) -> Option<(Point2f, f32)> {
-        self.aim_horizon(bboxes, crosshair, random)
-    }
 }
 
 impl Default for AimMode {

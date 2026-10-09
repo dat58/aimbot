@@ -381,9 +381,9 @@ predict how a setting will feel before trying it.
 
 1. **Engagement.** A flick is planned only when `min_zone < dist ≤ fov`, both
    in frame pixels. `min_zone` is roughly half the target box, times
-   `scale_min_zone`. With ESP button 2 held it is `aim_smooth`'s zone — half
-   the box *width*, or half its larger side when the crosshair is level with
-   a head box — times `scale_min_zone`.
+   `scale_min_zone`. Under `aim_mode = "horizon"` it is half the box *width*,
+   or half its larger side when the crosshair is level with a head box, times
+   the same `scale_min_zone`.
 
 2. **Size, in mouse counts.**
 

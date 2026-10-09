@@ -81,10 +81,8 @@ pub fn poll_hz_for_baud(baud: u32) -> u32 {
 /// Numeric tuning for the human-flick model behind
 /// [`crate::mouse::MouseVirtual::move_smooth`].
 ///
-/// Whether that model is used at all is not decided here. `MOVE_SMOOTH` picks
-/// it over `move_bezier` for the ordinary aim modes, and
-/// [`crate::aim::AimMode::aim_smooth`] — the ESP button 2 path — always uses
-/// it regardless.
+/// Whether that model is used at all is not decided here: each [`Profile`]
+/// picks its own [`Mover`].
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SmoothConfig {

@@ -25,7 +25,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info"))?,
         ))
         .init();
-    let config = Config::new();
+    let config = Config::load(std::path::Path::new("config.toml"))
+        .expect("cannot load config.toml");
     let mouse = Arc::new(MouseVirtual::new(&config.makcu_port, config.makcu_baud)?);
 
     // `mouse_test latency [counts] [samples]` measures the capture latency and
@@ -76,7 +77,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     tracing::info!("[4] Testing side5 mouse button presses successfully");
     tracing::info!("---------------------------------------------------");
     let mut random = rand::rng();
-    let mut smooth = SmoothAim::new(config.smooth, config.makcu_baud, config.mouse_dpi);
+    let profile = config.profile(config.esp_button_1_profile);
+    tracing::info!("[5] Using profile {:?} ({})", profile.name, profile.mover);
+    let mut smooth = SmoothAim::new(profile.smooth, config.makcu_baud, config.mouse_dpi);
     let mut use_smooth = true;
     tracing::info!("[5] Testing for mouse move");
     tracing::info!("[5] Input separate for dy, dy; type q to quit, s to switch path");

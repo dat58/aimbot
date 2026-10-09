@@ -16,7 +16,8 @@ pub const AIM_MODE_LENGTH: u8 = 5;
 #[derive(Clone, Debug)]
 pub struct AimMode(Arc<AtomicU8>);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Mode {
     Head,
     Neck,
@@ -40,7 +41,17 @@ impl AimMode {
         crosshair: &Point2f,
         random: &mut ThreadRng,
     ) -> Option<(Point2f, f32)> {
-        match self.mode() {
+        self.aim_as(self.mode(), bboxes, crosshair, random)
+    }
+
+    pub fn aim_as(
+        &self,
+        mode: Mode,
+        bboxes: &Bboxes,
+        crosshair: &Point2f,
+        random: &mut ThreadRng,
+    ) -> Option<(Point2f, f32)> {
+        match mode {
             Mode::Head => self.aim_head(bboxes),
             Mode::Neck => self.aim_neck(bboxes),
             Mode::Chest => self.aim_chest(bboxes),

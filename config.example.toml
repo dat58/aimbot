@@ -1,0 +1,63 @@
+source_stream = "assets/2025-08-1613-52-57.mp4"
+event_listener_port = 5432
+ndi_source_name = "MINIPC"
+ndi_timeout_ms = 30
+
+# source_stream = "elgato:///dev/video0"
+capture_width = 1920
+capture_height = 1080
+capture_fps = 240
+capture_fourcc = "MPJG"
+capture_timeout_ms = 2000
+capture_buffers = 3
+capture_roi = true
+
+screen_width = 2560
+screen_height = 1440
+region_left = 864
+region_top = 444
+region_width = 192
+region_height = 192
+
+model_provider = "CPU"
+model_path = "assets/v_light_192_fp16_onnx.onnx"
+model_input_size = 192
+model_conf_body = 0.5
+model_conf_head = 0.1
+model_iou = 0.6
+
+trt_cache_dir = "assets"
+trt_min_shapes = "images:1x3x192x192"
+trt_opt_shapes = "images:1x3x192x192"
+trt_max_shapes = "images:1x3x192x192"
+trt_fp16 = true
+trt_max_partition_iterations = 12
+trt_builder_optimization_level = 5
+
+openvino_cache_dir = "assets"
+openvino_device_type = "CPU"
+intra_threads = 1
+
+makcu_port = "/dev/ttyACM0"
+makcu_baud = 4000000
+mouse_dpi = 1000.0
+game_sens = 0.38
+
+default_aim_mode = 4
+
+esp_button_1_profile = 0
+esp_button_2_profile = 1
+
+[[profile]]
+name = "tracking"
+scale_min_zone = 0.25
+mover = "smooth"
+
+[[profile]]
+name = "flick"
+scale_min_zone = 0.25
+mover = "smooth"
+aim_mode = "horizon"
+move_smooth_auto_click = true
+move_smooth_auto_click_miss_p = 0.1
+move_smooth_auto_click_rate_limit_ms = 250

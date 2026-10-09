@@ -1,6 +1,12 @@
+use crate::aim::Mode;
 use crate::stream::elgato::OutputFormat;
 use crate::stream::v4l2::parse_fourcc;
-use std::{env::var, path::PathBuf, time::Duration};
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Deserializer};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 pub const SCALE_HEAD_Y: f32 = 1. / 6.;
 pub const SCALE_HEAD_X: f32 = 0.6;
@@ -79,54 +85,76 @@ pub fn poll_hz_for_baud(baud: u32) -> u32 {
 /// it over `move_bezier` for the ordinary aim modes, and
 /// [`crate::aim::AimMode::aim_smooth`] — the ESP button 2 path — always uses
 /// it regardless.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct SmoothConfig {
     /// Report cadence. `0` derives it from `MAKCU_BAUD`; see
     /// [`poll_hz_for_baud`].
+    #[serde(rename = "move_smooth_poll_hz")]
     pub poll_hz: u32,
     /// Fitts intercept, milliseconds.
+    #[serde(rename = "move_smooth_fitts_a_ms")]
     pub fitts_a_ms: f64,
     /// Fitts slope, milliseconds per bit of index of difficulty.
+    #[serde(rename = "move_smooth_fitts_b_ms")]
     pub fitts_b_ms: f64,
+    #[serde(rename = "move_smooth_min_ms")]
     pub min_ms: f64,
+    #[serde(rename = "move_smooth_max_ms")]
     pub max_ms: f64,
     /// Lognormal spread applied to the movement time, as a fraction. 0.12
     /// gives a coefficient of variation near 12%, which is what human
     /// trial-to-trial variability looks like.
+    #[serde(rename = "move_smooth_mt_jitter")]
     pub mt_jitter: f64,
     /// Fraction of the distance the ballistic phase commits to. The rest is
     /// left for the next frame's corrective submovement.
+    #[serde(rename = "move_smooth_gain")]
     pub gain: f64,
+    #[serde(rename = "move_smooth_gain_sd")]
     pub gain_sd: f64,
     /// How often a flick overshoots instead of falling short.
+    #[serde(rename = "move_smooth_overshoot_p")]
     pub overshoot_p: f64,
     /// Where peak speed sits, as a fraction of the movement time.
+    #[serde(rename = "move_smooth_peak_min")]
     pub peak_min: f64,
+    #[serde(rename = "move_smooth_peak_max")]
     pub peak_max: f64,
     /// Maximum perpendicular deviation from the straight line, as a fraction
     /// of the amplitude.
+    #[serde(rename = "move_smooth_bow")]
     pub bow: f64,
     /// How strongly the bow direction follows the direction of travel. `0` is
     /// a coin flip, `0.5` is fully handed.
+    #[serde(rename = "move_smooth_curve_bias")]
     pub curve_bias: f64,
     /// Skews where along the path the bow peaks.
+    #[serde(rename = "move_smooth_kappa_min")]
     pub kappa_min: f64,
+    #[serde(rename = "move_smooth_kappa_max")]
     pub kappa_max: f64,
     /// Harris & Wolpert coefficient: noise standard deviation as a fraction of
     /// the per-report displacement.
+    #[serde(rename = "move_smooth_noise")]
     pub noise: f64,
     /// Physiological tremor amplitude, in mouse counts. `0` disables it.
+    #[serde(rename = "move_smooth_tremor")]
     pub tremor: f64,
     /// Reaction latency on a fresh acquisition. Off by default, because the
     /// ESP trigger button already supplies a human reaction time — the command
     /// only leaves this process while that button is held.
+    #[serde(rename = "move_smooth_react_min_ms")]
     pub react_min_ms: u64,
+    #[serde(rename = "move_smooth_react_max_ms")]
     pub react_max_ms: u64,
     /// Silence longer than this means the old target is gone, so the leftover
     /// sub-count fraction describes a move that no longer exists.
+    #[serde(rename = "move_smooth_gap_ms")]
     pub gap_ms: u64,
     /// Ceiling on a single report, in counts. Excess is deferred to the next
     /// report rather than dropped.
+    #[serde(rename = "move_smooth_max_counts")]
     pub max_counts: i64,
     /// Fire a left click once the flick has settled.
     ///
@@ -134,11 +162,14 @@ pub struct SmoothConfig {
     /// `move_smooth` is called once per frame while the trigger is held, so a
     /// held trigger produces a click roughly every
     /// `auto_click_lower_ms + hold` — a few per second, not one per target.
+    #[serde(rename = "move_smooth_auto_click")]
     pub auto_click: bool,
     /// Delay between the flick ending and the click, in milliseconds, drawn
     /// uniformly. Stands in for the gap between settling on a target and
     /// deciding to shoot, so it should not be zero.
+    #[serde(rename = "move_smooth_auto_click_lower_ms")]
     pub auto_click_lower_ms: u64,
+    #[serde(rename = "move_smooth_auto_click_upper_ms")]
     pub auto_click_upper_ms: u64,
     /// Chance in `[0, 1]` that a click is fired without letting the aim settle
     /// first — a deliberate miss. `0` never misses, `1` always does.
@@ -153,6 +184,7 @@ pub struct SmoothConfig {
     /// Worth having above zero: never missing is itself a signature. Note this
     /// is unrelated to [`Self::overshoot_p`], which decides whether a *movement*
     /// goes past its target rather than whether a *shot* does.
+    #[serde(rename = "move_smooth_auto_click_miss_p")]
     pub auto_click_miss_p: f64,
     /// Smallest gap between two clicks, in milliseconds. `0` disables the
     /// limit.
@@ -162,6 +194,7 @@ pub struct SmoothConfig {
     /// delay happen to multiply out to. A limited click is skipped outright
     /// rather than deferred: the worker does not even wait out the delay, so
     /// the aim keeps tracking instead of stalling on a click it will not fire.
+    #[serde(rename = "move_smooth_auto_click_rate_limit_ms")]
     pub auto_click_rate_limit_ms: u64,
     /// Hand-speed envelope, in inches per second of physical mouse travel.
     ///
@@ -185,7 +218,9 @@ pub struct SmoothConfig {
     /// any `MOUSE_DPI` and `GAME_SENS`, instead of needing a retune whenever
     /// the counts-per-pixel changes — which is not a tuning knob but a fact
     /// about the mouse and the game.
+    #[serde(rename = "move_smooth_min_speed_ips")]
     pub min_speed_ips: f64,
+    #[serde(rename = "move_smooth_max_speed_ips")]
     pub max_speed_ips: f64,
     /// Send each report as `km.move_now` instead of `km.move`.
     ///
@@ -198,6 +233,7 @@ pub struct SmoothConfig {
     ///
     /// Off by default because the command does not exist on older firmware,
     /// where enabling it would stop the mouse moving at all.
+    #[serde(rename = "move_smooth_move_now")]
     pub move_now: bool,
     /// Mean counts a report should carry, which sets how many reports a stroke
     /// of a given amplitude is worth planning.
@@ -213,6 +249,7 @@ pub struct SmoothConfig {
     /// A real mouse mid-flick reports tens of counts at a time, so anything at
     /// or above ~1 keeps every report doing work. Raise it for fewer, larger
     /// reports; below 1 the zero-report problem starts to come back.
+    #[serde(rename = "move_smooth_counts_per_report")]
     pub counts_per_report: f64,
 }
 
@@ -254,422 +291,510 @@ impl Default for SmoothConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mover {
+    #[default]
+    Smooth,
+    Bezier,
+}
+
+impl std::fmt::Display for Mover {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Mover::Smooth => write!(f, "smooth"),
+            Mover::Bezier => write!(f, "bezier"),
+        }
+    }
+}
+
+/// One set of aim and movement tuning, selected by which ESP button is held.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Profile {
+    pub name: String,
+    /// condition to trigger, if fov <= L2 distance -> allow trigger.
+    /// `0` or absent means the whole frame.
+    #[serde(default)]
+    pub fov: f32,
+    pub scale_min_zone: f32,
+    #[serde(default)]
+    pub mover: Mover,
+    /// Pins the aim mode for this profile. Absent follows the runtime
+    /// [`crate::aim::AimMode`], which the event listener can change.
+    #[serde(default)]
+    pub aim_mode: Option<Mode>,
+    #[serde(flatten)]
+    smooth_keys: toml::Table,
+    /// Tuning for the human-flick model; see [`SmoothConfig`].
+    #[serde(skip)]
+    pub smooth: SmoothConfig,
+}
+
+fn de_millis<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Duration, D::Error> {
+    Ok(Duration::from_millis(u64::deserialize(d)?))
+}
+
+fn de_fourcc<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Option<u32>, D::Error> {
+    let raw = Option::<String>::deserialize(d)?;
+    match raw {
+        Some(s) if !s.trim().is_empty() => {
+            parse_fourcc(&s).map(Some).map_err(serde::de::Error::custom)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn de_output_format<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<OutputFormat, D::Error> {
+    OutputFormat::parse(&String::deserialize(d)?).map_err(serde::de::Error::custom)
+}
+
+fn default_event_listener_port() -> u16 {
+    10000
+}
+fn default_ndi_timeout() -> Duration {
+    Duration::from_millis(1000)
+}
+fn default_screen_width() -> u32 {
+    1920
+}
+fn default_screen_height() -> u32 {
+    1080
+}
+fn default_model_provider() -> String {
+    String::from("cpu")
+}
+fn default_capture_device() -> String {
+    String::from("/dev/video0")
+}
+fn default_capture_fps() -> u32 {
+    60
+}
+fn default_capture_buffers() -> u32 {
+    3
+}
+fn default_capture_timeout() -> Duration {
+    Duration::from_millis(1000)
+}
+fn default_output_format() -> OutputFormat {
+    OutputFormat::Bgr
+}
+fn default_openvino_device_type() -> String {
+    String::from("CPU")
+}
+fn default_intra_threads() -> usize {
+    1
+}
+fn default_makcu_baud() -> u32 {
+    115_200
+}
+fn default_mouse_dpi() -> f64 {
+    1000.
+}
+fn default_game_sens() -> f64 {
+    1.
+}
+fn enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
+    #[serde(default = "default_event_listener_port")]
     pub event_listener_port: u16,
 
     pub source_stream: String,
+    #[serde(default)]
     pub ndi_source_name: Option<String>,
-    pub ndi_timeout: std::time::Duration,
+    #[serde(
+        default = "default_ndi_timeout",
+        rename = "ndi_timeout_ms",
+        deserialize_with = "de_millis"
+    )]
+    pub ndi_timeout: Duration,
+    #[serde(default = "default_screen_width")]
     pub screen_width: u32,
+    #[serde(default = "default_screen_height")]
     pub screen_height: u32,
     /// Geometry of the frames that actually arrive, which is what `REGION_*`
     /// and every detection are measured in. See [`frame_geometry`].
+    #[serde(skip)]
     pub frame_width: u32,
+    #[serde(skip)]
     pub frame_height: u32,
     /// Frame pixel -> screen pixel, per axis. `(1.0, 1.0)` when the capture
     /// already matches the screen.
+    #[serde(skip)]
     pub frame_to_screen: (f64, f64),
+    #[serde(default)]
     pub region_top: u32,
+    #[serde(default)]
     pub region_left: u32,
+    #[serde(default)]
     pub region_width: u32,
+    #[serde(default)]
     pub region_height: u32,
-    pub scale_min_zone1: f32,
-    pub scale_min_zone2: f32,
-    /// condition to trigger, if fov <= L2 distance -> allow trigger
-    pub fov: f32,
 
+    pub esp_button_1_profile: usize,
+    pub esp_button_2_profile: usize,
+    #[serde(rename = "profile")]
+    pub profiles: Vec<Profile>,
+
+    #[serde(default = "default_model_provider")]
     pub model_provider: String,
     pub model_path: PathBuf,
     pub model_input_size: usize,
     pub model_conf_body: f32,
     pub model_conf_head: f32,
     pub model_iou: f32,
+    #[serde(default)]
     pub build_head_iou: Option<f32>,
 
     /// True for the `v_light_*` models, which need the nearest-neighbour
     /// stretch preprocess and the raw multi-class output decoder.
+    #[serde(skip)]
     pub light_model: bool,
 
+    #[serde(default = "default_capture_device")]
     pub capture_device: String,
+    #[serde(default = "default_screen_width")]
     pub capture_width: u32,
+    #[serde(default = "default_screen_height")]
     pub capture_height: u32,
+    #[serde(default = "default_capture_fps")]
     pub capture_fps: u32,
+    #[serde(default, deserialize_with = "de_fourcc")]
     pub capture_fourcc: Option<u32>,
+    #[serde(default = "default_capture_buffers")]
     pub capture_buffers: u32,
+    #[serde(default = "enabled")]
     pub capture_drop_stale: bool,
+    #[serde(
+        default = "default_capture_timeout",
+        rename = "capture_timeout_ms",
+        deserialize_with = "de_millis"
+    )]
     pub capture_timeout: Duration,
+    #[serde(default = "default_output_format", deserialize_with = "de_output_format")]
     pub capture_output: OutputFormat,
     /// Hand only `REGION_*` downstream instead of the whole frame. The
     /// detection pipeline never looks outside that region, so converting or
     /// JPEG-decoding the rest is pure latency. Turn it off for the `debug`
     /// feature's whole-frame bbox overlay.
+    #[serde(default = "enabled")]
     pub capture_roi: bool,
 
+    #[serde(default)]
     pub gpu_id: Option<i32>,
+    #[serde(default)]
     pub gpu_mem_limit: Option<usize>,
+    #[serde(default)]
     pub trt_min_shapes: String,
+    #[serde(default)]
     pub trt_opt_shapes: String,
+    #[serde(default)]
     pub trt_max_shapes: String,
+    #[serde(default)]
     pub trt_fp16: Option<bool>,
+    #[serde(default)]
     pub trt_max_partition_iterations: Option<u32>,
+    #[serde(default)]
     pub trt_builder_optimization_level: Option<u8>,
+    #[serde(default)]
     pub trt_dla_enable: Option<bool>,
+    #[serde(default)]
     pub trt_dla_core: Option<u32>,
+    #[serde(default)]
     pub trt_auxiliary_streams: Option<i8>,
+    #[serde(default)]
     pub trt_cache_dir: String,
 
+    #[serde(default)]
     pub openvino_cache_dir: String,
+    #[serde(default = "default_openvino_device_type")]
     pub openvino_device_type: String,
+    #[serde(default = "default_intra_threads")]
     pub intra_threads: usize,
 
     pub makcu_port: String,
+    #[serde(default = "default_makcu_baud")]
     pub makcu_baud: u32,
+    #[serde(default)]
     pub makcu_listen: bool,
+    #[serde(default = "default_mouse_dpi")]
     pub mouse_dpi: f64,
+    #[serde(default = "default_game_sens")]
     pub game_sens: f64,
-    /// `MOVE_SMOOTH`: move through the human-flick model instead of the
-    /// firmware bezier in the ordinary aim modes. The ESP button 2 path uses
-    /// it whatever this says.
-    pub move_smooth: bool,
-    /// Tuning for the human-flick model; see [`SmoothConfig`].
-    pub smooth: SmoothConfig,
 
+    #[serde(default)]
     pub esp_port: Option<String>,
+    #[serde(default)]
     pub default_aim_mode: Option<u8>,
 }
 
 impl Config {
-    pub fn new() -> Self {
-        let event_listener_port = var("EVENT_LISTENER_PORT")
-            .unwrap_or(String::from("10000"))
-            .parse::<u16>()
-            .expect("EVENT_LISTENER_PORT is not a valid port");
-        let source_stream = var("SOURCE_STREAM").expect("No SOURCE_STREAM specified");
-        let ndi_source_name = var("NDI_SOURCE_NAME").ok();
-        let ndi_timeout = std::time::Duration::from_millis(
-            var("NDI_TIMEOUT")
-                .unwrap_or(String::from("1000"))
-                .parse::<u64>()
-                .expect("NDI_TIMEOUT is not a valid integer"),
-        );
-        let screen_width = var("SCREEN_WIDTH")
-            .unwrap_or("1920".to_string())
-            .parse::<u32>()
-            .expect("SCREEN_WIDTH is not a number");
-        let screen_height = var("SCREEN_HEIGHT")
-            .unwrap_or("1080".to_string())
-            .parse::<u32>()
-            .expect("SCREEN_HEIGHT is not a number");
-        let region_top = var("REGION_TOP")
-            .unwrap_or("0".to_string())
-            .parse::<u32>()
-            .expect("REGION_TOP is not a number");
-        let region_left = var("REGION_LEFT")
-            .unwrap_or("0".to_string())
-            .parse::<u32>()
-            .expect("REGION_LEFT is not a number");
-        let region_width = var("REGION_WIDTH")
-            .unwrap_or("0".to_string())
-            .parse::<u32>()
-            .expect("REGION_WIDTH is not a number");
-        let region_height = var("REGION_HEIGHT")
-            .unwrap_or("0".to_string())
-            .parse::<u32>()
-            .expect("REGION_HEIGHT is not a number");
-        let scale_min_zone1 = var("SCALE_MIN_ZONE1")
-            .unwrap_or("0.5".to_string())
-            .parse::<f32>()
-            .expect("SCALE_MIN_ZONE1 is not a number");
-        let scale_min_zone2 = var("SCALE_MIN_ZONE2")
-            .unwrap_or("0.8".to_string())
-            .parse::<f32>()
-            .expect("SCALE_MIN_ZONE2 is not a number");
-        let model_provider = var("MODEL_PROVIDER").unwrap_or("cpu".to_string());
-        let model_path = PathBuf::from(var("MODEL_PATH").expect("No MODEL_PATH specified"));
-        if !model_path.is_file() {
-            panic!("Model path is not a file");
-        }
-        let model_input_size = var("MODEL_INPUT_SIZE")
-            .expect("No MODEL_INPUT_SIZE specified")
-            .parse::<usize>()
-            .expect("MODEL_INPUT_SIZE is not a number");
-        let model_conf_body = var("MODEL_CONF_BODY")
-            .expect("No MODEL_CONF_BODY specified")
-            .parse::<f32>()
-            .expect("MODEL_CONF_BODY is not a number");
-        let model_conf_head = var("MODEL_CONF_HEAD")
-            .expect("No MODEL_CONF_HEAD specified")
-            .parse::<f32>()
-            .expect("MODEL_CONF_HEAD is not a number");
-        let model_iou = var("MODEL_IOU")
-            .expect("No MODEL_IOU specified")
-            .parse::<f32>()
-            .expect("MODEL_IOU is not a number");
-        let build_head_iou = var("BUILD_HEAD_IOU")
-            .ok()
-            .map(|o| o.parse::<f32>().expect("BUILD_HEAD_IOU is not a number"));
+    pub fn load(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read config file {}", path.display()))?;
+        let mut config: Self = toml::from_str(&text)
+            .with_context(|| format!("{} is not a valid config", path.display()))?;
+        config.resolve()?;
+        Ok(config)
+    }
 
-        // The `v_light_*` models need a different preprocess and output decoder;
-        // the file name is what selects it.
-        let light_model = model_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.to_ascii_lowercase().starts_with("v_light"));
+    pub fn parse(text: &str) -> Result<Self> {
+        let mut config: Self = toml::from_str(text)?;
+        config.resolve()?;
+        Ok(config)
+    }
 
-        let capture_device = var("CAPTURE_DEVICE").unwrap_or("/dev/video0".to_string());
-        let capture_width = var("CAPTURE_WIDTH")
-            .unwrap_or("1920".to_string())
-            .parse::<u32>()
-            .expect("CAPTURE_WIDTH is not a number");
-        let capture_height = var("CAPTURE_HEIGHT")
-            .unwrap_or("1080".to_string())
-            .parse::<u32>()
-            .expect("CAPTURE_HEIGHT is not a number");
-        let capture_fps = var("CAPTURE_FPS")
-            .unwrap_or("60".to_string())
-            .parse::<u32>()
-            .expect("CAPTURE_FPS is not a number");
-        let capture_fourcc = var("CAPTURE_FOURCC")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .map(|v| parse_fourcc(&v).expect("CAPTURE_FOURCC is not a valid fourcc"));
-        let capture_buffers = var("CAPTURE_BUFFERS")
-            .unwrap_or("3".to_string())
-            .parse::<u32>()
-            .expect("CAPTURE_BUFFERS is not a number");
-        let capture_drop_stale = var("CAPTURE_DROP_STALE")
-            .unwrap_or("true".to_string())
-            .parse::<bool>()
-            .expect("CAPTURE_DROP_STALE is not a bool");
-        let capture_timeout = Duration::from_millis(
-            var("CAPTURE_TIMEOUT_MS")
-                .unwrap_or("1000".to_string())
-                .parse::<u64>()
-                .expect("CAPTURE_TIMEOUT_MS is not a valid integer"),
-        );
-        let capture_output = OutputFormat::parse(&var("CAPTURE_OUTPUT").unwrap_or_default())
-            .expect("CAPTURE_OUTPUT is not valid");
+    fn resolve(&mut self) -> Result<()> {
         let ((frame_width, frame_height), frame_to_screen) = frame_geometry(
-            &source_stream,
-            (screen_width, screen_height),
-            (capture_width, capture_height),
+            &self.source_stream,
+            (self.screen_width, self.screen_height),
+            (self.capture_width, self.capture_height),
         );
-        if (frame_width, frame_height) != (screen_width, screen_height) {
+        self.frame_width = frame_width;
+        self.frame_height = frame_height;
+        self.frame_to_screen = frame_to_screen;
+        if (frame_width, frame_height) != (self.screen_width, self.screen_height) {
             tracing::info!(
                 "[Config] frames arrive at {}x{} while the game renders at {}x{}; \
-                 REGION_* and detections are in frame pixels and mouse deltas are \
+                 region_* and detections are in frame pixels and mouse deltas are \
                  scaled by {:.4}x/{:.4}y",
                 frame_width,
                 frame_height,
-                screen_width,
-                screen_height,
+                self.screen_width,
+                self.screen_height,
                 frame_to_screen.0,
                 frame_to_screen.1,
             );
         }
-        let capture_roi = var("CAPTURE_ROI")
-            .unwrap_or("true".to_string())
-            .parse::<bool>()
-            .expect("CAPTURE_ROI is not a bool");
-        let gpu_id = var("GPU_ID").ok().and_then(|s| s.parse::<i32>().ok());
-        let gpu_mem_limit = var("GPU_MEM_LIMIT")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok());
-        let trt_min_shapes = var("TRT_MIN_SHAPES").expect("TRT_MIN_SHAPES missing");
-        let trt_opt_shapes = var("TRT_OPT_SHAPES").expect("TRT_OPT_SHAPES missing");
-        let trt_max_shapes = var("TRT_MAX_SHAPES").expect("TRT_MAX_SHAPES missing");
-        let trt_fp16 = var("TRT_FP16").ok().and_then(|s| s.parse::<bool>().ok());
-        let trt_max_partition_iterations = var("TRT_MAX_PARTITION_ITERATIONS")
-            .ok()
-            .and_then(|s| s.parse::<u32>().ok());
-        let trt_builder_optimization_level = var("TRT_BUILDER_OPTIMIZATION_LEVEL")
-            .ok()
-            .and_then(|s| s.parse::<u8>().ok());
-        let trt_dla_enable = var("TRT_DLA_ENABLE")
-            .ok()
-            .and_then(|s| s.parse::<bool>().ok());
-        let trt_dla_core = var("TRT_DLA_CORE").ok().and_then(|s| s.parse::<u32>().ok());
-        let trt_auxiliary_streams = var("TRT_AUXILIARY_STREAMS")
-            .ok()
-            .and_then(|s| s.parse::<i8>().ok());
-        let trt_cache_dir = var("TRT_CACHE_DIR").expect("No TRT_CACHE_DIR specified");
-        let openvino_cache_dir =
-            var("OPENVINO_CACHE_DIR").expect("No OPENVINO_CACHE_DIR specified");
-        let openvino_device_type = var("OPENVINO_DEVICE_TYPE").unwrap_or("CPU".to_string());
-        let intra_threads = var("INTRA_THREADS")
-            .unwrap_or("1".to_string())
-            .parse::<usize>()
-            .expect("INTRA_THREADS must be a number");
-        let makcu_port = var("MAKCU_PORT").expect("No MAKCU_PORT specified");
-        let makcu_baud = var("MAKCU_BAUD")
-            .unwrap_or("115200".to_string())
-            .parse::<u32>()
-            .expect("MAKCU_BAUD is not an integer");
-        let makcu_listen = var("MAKCU_LISTEN")
-            .unwrap_or("false".to_string())
-            .parse::<bool>()
-            .expect("MAKCU_LISTEN is not a bool");
-        let mouse_dpi = var("MOUSE_DPI")
-            .unwrap_or("1000.".to_string())
-            .parse::<f64>()
-            .expect("MOUSE_DPI is not a number");
-        let game_sens = var("GAME_SENS")
-            .unwrap_or("1.".to_string())
-            .parse::<f64>()
-            .expect("GAME_SENS is not a number");
-        // `mouse_counts` divides by both. A zero there yields an infinite
-        // delta, and `NaN as i32` saturates to zero rather than panicking, so
-        // the failure would be a silently frozen aim instead of a crash.
-        if !(game_sens > 0.) {
-            panic!("GAME_SENS must be greater than zero");
+
+        self.light_model = self
+            .model_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.to_ascii_lowercase().starts_with("v_light"));
+        if !self.model_path.is_file() {
+            bail!("model_path {} is not a file", self.model_path.display());
         }
-        if !(mouse_dpi > 0.) {
-            panic!("MOUSE_DPI must be greater than zero");
+
+        if !self.game_sens.is_finite() || self.game_sens <= 0. {
+            bail!("game_sens must be greater than zero");
         }
-        let move_smooth = var("MOVE_SMOOTH")
-            .unwrap_or("false".to_string())
-            .parse::<bool>()
-            .expect("MOVE_SMOOTH is not a bool");
-        let default_smooth = SmoothConfig::default();
-        let smooth_f = |name: &str, default: f64| -> f64 {
-            var(name)
-                .unwrap_or(default.to_string())
-                .parse::<f64>()
-                .unwrap_or_else(|_| panic!("{name} is not a number"))
-        };
-        let smooth_u64 = |name: &str, default: u64| -> u64 {
-            var(name)
-                .unwrap_or(default.to_string())
-                .parse::<u64>()
-                .unwrap_or_else(|_| panic!("{name} is not an integer"))
-        };
-        let smooth = SmoothConfig {
-            poll_hz: var("MOVE_SMOOTH_POLL_HZ")
-                .unwrap_or("0".to_string())
-                .parse::<u32>()
-                .expect("MOVE_SMOOTH_POLL_HZ is not a number"),
-            fitts_a_ms: smooth_f("MOVE_SMOOTH_FITTS_A_MS", default_smooth.fitts_a_ms),
-            fitts_b_ms: smooth_f("MOVE_SMOOTH_FITTS_B_MS", default_smooth.fitts_b_ms),
-            min_ms: smooth_f("MOVE_SMOOTH_MIN_MS", default_smooth.min_ms),
-            max_ms: smooth_f("MOVE_SMOOTH_MAX_MS", default_smooth.max_ms),
-            gain: smooth_f("MOVE_SMOOTH_GAIN", default_smooth.gain),
-            overshoot_p: smooth_f("MOVE_SMOOTH_OVERSHOOT_P", default_smooth.overshoot_p),
-            peak_min: smooth_f("MOVE_SMOOTH_PEAK_MIN", default_smooth.peak_min),
-            peak_max: smooth_f("MOVE_SMOOTH_PEAK_MAX", default_smooth.peak_max),
-            bow: smooth_f("MOVE_SMOOTH_BOW", default_smooth.bow),
-            noise: smooth_f("MOVE_SMOOTH_NOISE", default_smooth.noise),
-            tremor: smooth_f("MOVE_SMOOTH_TREMOR", default_smooth.tremor),
-            react_min_ms: smooth_u64("MOVE_SMOOTH_REACT_MIN_MS", default_smooth.react_min_ms),
-            react_max_ms: smooth_u64("MOVE_SMOOTH_REACT_MAX_MS", default_smooth.react_max_ms),
-            move_now: var("MOVE_SMOOTH_MOVE_NOW")
-                .unwrap_or(default_smooth.move_now.to_string())
-                .parse::<bool>()
-                .expect("MOVE_SMOOTH_MOVE_NOW is not a bool"),
-            auto_click: var("MOVE_SMOOTH_AUTO_CLICK")
-                .unwrap_or(default_smooth.auto_click.to_string())
-                .parse::<bool>()
-                .expect("MOVE_SMOOTH_AUTO_CLICK is not a bool"),
-            auto_click_lower_ms: smooth_u64(
-                "MOVE_SMOOTH_AUTO_CLICK_LOWER_MS",
-                default_smooth.auto_click_lower_ms,
-            ),
-            auto_click_upper_ms: smooth_u64(
-                "MOVE_SMOOTH_AUTO_CLICK_UPPER_MS",
-                default_smooth.auto_click_upper_ms,
-            ),
-            auto_click_miss_p: smooth_f(
-                "MOVE_SMOOTH_AUTO_CLICK_MISS_P",
-                default_smooth.auto_click_miss_p,
-            ),
-            auto_click_rate_limit_ms: smooth_u64(
-                "MOVE_SMOOTH_AUTO_CLICK_RATE_LIMIT",
-                default_smooth.auto_click_rate_limit_ms,
-            ),
-            min_speed_ips: smooth_f("MOVE_SMOOTH_MIN_SPEED_IPS", default_smooth.min_speed_ips),
-            max_speed_ips: smooth_f("MOVE_SMOOTH_MAX_SPEED_IPS", default_smooth.max_speed_ips),
-            counts_per_report: smooth_f(
-                "MOVE_SMOOTH_COUNTS_PER_REPORT",
-                default_smooth.counts_per_report,
-            ),
-            ..default_smooth
-        };
-        let esp_port = var("ESP_PORT").ok();
-        // Compared against `dist`, which is a frame-pixel distance because
-        // `min_zone` comes straight off bbox dimensions.
-        let fov = var("FOV")
-            .unwrap_or((frame_width as f32).to_string())
-            .parse()
-            .unwrap();
-        let default_aim_mode = var("DEFAULT_AIM_MODE")
-            .ok()
-            .and_then(|v| Some(v.parse::<u8>().expect("DEFAULT_AIM_MODE is not a u8")));
-        Self {
-            event_listener_port,
-            source_stream,
-            ndi_source_name,
-            ndi_timeout,
-            screen_width,
-            screen_height,
-            frame_width,
-            frame_height,
-            frame_to_screen,
-            region_top,
-            region_left,
-            region_width,
-            region_height,
-            scale_min_zone1,
-            scale_min_zone2,
-            model_provider,
-            model_path,
-            model_input_size,
-            model_conf_body,
-            model_conf_head,
-            model_iou,
-            build_head_iou,
-            light_model,
-            capture_device,
-            capture_width,
-            capture_height,
-            capture_fps,
-            capture_fourcc,
-            capture_buffers,
-            capture_drop_stale,
-            capture_timeout,
-            capture_output,
-            capture_roi,
-            gpu_id,
-            gpu_mem_limit,
-            trt_min_shapes,
-            trt_opt_shapes,
-            trt_max_shapes,
-            trt_fp16,
-            trt_max_partition_iterations,
-            trt_builder_optimization_level,
-            trt_dla_enable,
-            trt_dla_core,
-            trt_auxiliary_streams,
-            trt_cache_dir,
-            openvino_cache_dir,
-            openvino_device_type,
-            intra_threads,
-            makcu_port,
-            makcu_baud,
-            makcu_listen,
-            mouse_dpi,
-            game_sens,
-            move_smooth,
-            smooth,
-            esp_port,
-            fov,
-            default_aim_mode,
+        if !self.mouse_dpi.is_finite() || self.mouse_dpi <= 0. {
+            bail!("mouse_dpi must be greater than zero");
         }
+
+        if self.profiles.is_empty() {
+            bail!("at least one [[profile]] is required");
+        }
+        for (label, index) in [
+            ("esp_button_1_profile", self.esp_button_1_profile),
+            ("esp_button_2_profile", self.esp_button_2_profile),
+        ] {
+            if index >= self.profiles.len() {
+                bail!(
+                    "{label} = {index} but only {} profile(s) are defined",
+                    self.profiles.len()
+                );
+            }
+        }
+        for profile in &mut self.profiles {
+            let keys = std::mem::take(&mut profile.smooth_keys);
+            profile.smooth = SmoothConfig::deserialize(toml::Value::Table(keys))
+                .with_context(|| format!("profile {:?}", profile.name))?;
+            if profile.fov <= 0. {
+                profile.fov = frame_width as f32;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn profile(&self, index: usize) -> &Profile {
+        &self.profiles[index]
+    }
+
+    pub fn profile_for(&self, esp_button_2_pressed: bool) -> (usize, &Profile) {
+        let index = if esp_button_2_pressed {
+            self.esp_button_2_profile
+        } else {
+            self.esp_button_1_profile
+        };
+        (index, &self.profiles[index])
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with(extra: &str) -> String {
+        format!(
+            "source_stream = \"elgato://\"\n\
+             model_path = \"Cargo.toml\"\n\
+             model_input_size = 640\n\
+             model_conf_body = 0.5\n\
+             model_conf_head = 0.5\n\
+             model_iou = 0.5\n\
+             makcu_port = \"/dev/ttyACM0\"\n\
+             esp_button_1_profile = 0\n\
+             esp_button_2_profile = 1\n\
+             {extra}\n"
+        )
+    }
+
+    const TWO_PROFILES: &str = r#"
+[[profile]]
+name = "tracking"
+fov = 35.0
+scale_min_zone = 0.5
+move_smooth_gain = 0.75
+move_smooth_auto_click = true
+
+[[profile]]
+name = "flick"
+fov = 300.0
+scale_min_zone = 0.8
+mover = "bezier"
+aim_mode = "horizon"
+"#;
+
+    #[test]
+    fn a_profile_carries_its_own_aim_and_movement_tuning() {
+        let config = Config::parse(&with(TWO_PROFILES)).unwrap();
+        assert_eq!(config.profiles.len(), 2);
+
+        let tracking = config.profile(config.esp_button_1_profile);
+        assert_eq!(tracking.name, "tracking");
+        assert_eq!(tracking.fov, 35.);
+        assert_eq!(tracking.scale_min_zone, 0.5);
+        assert_eq!(tracking.mover, Mover::Smooth);
+        assert_eq!(tracking.aim_mode, None);
+        assert_eq!(tracking.smooth.gain, 0.75);
+        assert!(tracking.smooth.auto_click);
+
+        let flick = config.profile(config.esp_button_2_profile);
+        assert_eq!(flick.mover, Mover::Bezier);
+        assert_eq!(flick.aim_mode, Some(Mode::Horizon));
+        assert_eq!(flick.smooth.gain, SmoothConfig::default().gain);
+    }
+
+    /// ESP button 2 picks its own profile; everything else — button 1, the
+    /// MAKCU side-4 button and no-trigger auto aim — shares button 1's.
+    #[test]
+    fn esp_button_two_is_the_only_thing_that_switches_profile() {
+        let config = Config::parse(&with(TWO_PROFILES)).unwrap();
+        let (held, _) = config.profile_for(true);
+        let (idle, _) = config.profile_for(false);
+        assert_eq!(held, config.esp_button_2_profile);
+        assert_eq!(idle, config.esp_button_1_profile);
+        assert_eq!(config.profile_for(true).1.name, "flick");
+        assert_eq!(config.profile_for(false).1.name, "tracking");
+
+        // Both buttons may point at the same profile, which is how you turn
+        // the split off without deleting one.
+        let same = with(TWO_PROFILES).replace("esp_button_2_profile = 1", "esp_button_2_profile = 0");
+        let config = Config::parse(&same).unwrap();
+        assert_eq!(config.profile_for(true).0, config.profile_for(false).0);
+    }
+
+    #[test]
+    fn a_profile_that_names_no_tuning_gets_the_defaults() {
+        let src = with("[[profile]]\nname = \"a\"\nscale_min_zone = 0.5\n\n\
+                        [[profile]]\nname = \"b\"\nscale_min_zone = 0.5\n");
+        let config = Config::parse(&src).unwrap();
+        assert_eq!(config.profiles[0].smooth, SmoothConfig::default());
+        assert_eq!(config.profiles[0].mover, Mover::Smooth);
+        assert_eq!(config.profiles[0].aim_mode, None);
+    }
+
+    /// `fov` is compared against a frame-pixel distance, so "unset" has to mean
+    /// the whole frame rather than zero, or nothing would ever be in range.
+    #[test]
+    fn an_unset_fov_covers_the_whole_frame() {
+        let src = with(
+            "screen_width = 2560\nscreen_height = 1440\n\
+             capture_width = 1920\ncapture_height = 1080\n\n\
+             [[profile]]\nname = \"a\"\nscale_min_zone = 0.5\n\n\
+             [[profile]]\nname = \"b\"\nscale_min_zone = 0.5\nfov = 0.0\n",
+        );
+        let config = Config::parse(&src).unwrap();
+        assert_eq!(config.frame_width, 1920);
+        assert_eq!(config.profiles[0].fov, 1920.);
+        assert_eq!(config.profiles[1].fov, 1920.);
+    }
+
+    #[test]
+    fn a_button_pointing_past_the_last_profile_is_refused() {
+        let src = with("[[profile]]\nname = \"only\"\nscale_min_zone = 0.5\n");
+        let err = Config::parse(&src).unwrap_err().to_string();
+        assert!(err.contains("esp_button_2_profile"), "{err}");
+        assert!(err.contains("1 profile"), "{err}");
+    }
+
+    #[test]
+    fn a_config_with_no_profiles_is_refused() {
+        let err = Config::parse(&with("profile = []")).unwrap_err().to_string();
+        assert!(err.contains("profile"), "{err}");
+    }
+
+    #[test]
+    fn a_zero_sensitivity_is_refused_rather_than_freezing_the_aim() {
+        for (key, value) in [("game_sens", "0.0"), ("mouse_dpi", "0.0")] {
+            let src = with(&format!("{key} = {value}\n{TWO_PROFILES}"));
+            let err = Config::parse(&src).unwrap_err().to_string();
+            assert!(err.contains(key), "{err}");
+        }
+    }
+
+    /// The `.env` this replaces had exactly this bug: it set `SCALE_MIN_ZONE`
+    /// while the code read `SCALE_MIN_ZONE1`, so the setting did nothing and
+    /// nothing said so. A mistyped key has to be an error.
+    #[test]
+    fn a_mistyped_key_is_refused_instead_of_silently_doing_nothing() {
+        let in_profile = with(
+            "[[profile]]\nname = \"a\"\nscale_min_zone = 0.5\nmove_smoth_gain = 0.5\n\n\
+             [[profile]]\nname = \"b\"\nscale_min_zone = 0.5\n",
+        );
+        assert!(
+            Config::parse(&in_profile).is_err(),
+            "a typo inside [[profile]] was accepted"
+        );
+
+        let at_root = with(&format!("screen_wdith = 2560\n{TWO_PROFILES}"));
+        assert!(
+            Config::parse(&at_root).is_err(),
+            "a typo in the common section was accepted"
+        );
+    }
+
+    /// Stops the shipped example rotting away from the schema it documents.
+    #[test]
+    fn the_shipped_example_config_parses() {
+        let text = std::fs::read_to_string("config.example.toml")
+            .unwrap()
+            .replace(
+                "model_path = \"assets/v_light_192_fp16_onnx.onnx\"",
+                "model_path = \"Cargo.toml\"",
+            );
+        let config = Config::parse(&text).unwrap();
+        assert_eq!(config.profiles.len(), 2);
+        assert!(config.esp_button_1_profile < config.profiles.len());
+        assert!(config.esp_button_2_profile < config.profiles.len());
+    }
+
+    #[test]
+    fn an_unknown_mover_or_aim_mode_is_refused() {
+        for bad in ["mover = \"teleport\"", "aim_mode = \"elbow\""] {
+            let src = with(&format!(
+                "[[profile]]\nname = \"a\"\nscale_min_zone = 0.5\n{bad}\n\n\
+                 [[profile]]\nname = \"b\"\nscale_min_zone = 0.5\n"
+            ));
+            assert!(Config::parse(&src).is_err(), "{bad} was accepted");
+        }
+    }
 
     #[test]
     fn a_v4l2_source_measures_frames_in_capture_pixels() {

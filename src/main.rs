@@ -2,7 +2,7 @@
 #![allow(unused_imports)]
 use aimbot::{
     aim::{AimMode, Mode},
-    config::{Config, mouse_counts},
+    config::{Config, Mover, mouse_counts},
     esp_button::EspButton,
     event::start_event_listener,
     model::{Bbox, Model, Point2f},
@@ -16,6 +16,7 @@ use opencv::core::{Mat, MatTraitConst};
 use rand::prelude::*;
 use std::{
     io::Write,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -28,6 +29,18 @@ use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::Subs
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+fn config_path() -> PathBuf {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--config" {
+            if let Some(path) = args.next() {
+                return PathBuf::from(path);
+            }
+        }
+    }
+    PathBuf::from("config.toml")
+}
+
 fn main() -> Result<()> {
     dotenv::dotenv().ok();
     tracing_subscriber::registry()
@@ -36,7 +49,7 @@ fn main() -> Result<()> {
         ))
         .init();
     ort::init().commit()?;
-    let config = Config::new();
+    let config = Config::load(&config_path())?;
     // Detections and `REGION_*` are in frame pixels, so the crosshair has to be
     // the centre of the frame, not of the screen. They differ whenever the
     // capture does not match the screen resolution.
@@ -206,8 +219,13 @@ fn main() -> Result<()> {
                 let mouse = mouse.clone();
                 let side4 = mouse.clone();
                 let queue = move_queue.clone();
-                let smooth =
-                    SmoothAim::new(config.smooth, config.makcu_baud, config.mouse_dpi);
+                let smooth: Vec<SmoothAim> = config
+                    .profiles
+                    .iter()
+                    .map(|profile| {
+                        SmoothAim::new(profile.smooth, config.makcu_baud, config.mouse_dpi)
+                    })
+                    .collect();
                 let trigger = trigger.clone();
                 let button1 = esp_button1.clone();
                 let button2 = esp_button2.clone();
@@ -223,6 +241,7 @@ fn main() -> Result<()> {
             }
 
             let mut random = rand::rng();
+            let mut last_profile = usize::MAX;
             // Fitts measures *visual* difficulty, so it wants screen pixels,
             // while `dist` and `min_zone` are frame pixels. The two coincide
             // only when the capture matches the screen.
@@ -244,21 +263,36 @@ fn main() -> Result<()> {
                         tracing::debug!("[Model] bboxes: {:?}", bboxes);
 
                         if bboxes.len() > 0 {
-                            // if esp button 2 is triggered it's always aim smooth
                             let esp_button2_pressed = esp_button2.load(Ordering::Acquire);
-                            let (destination, min_zone) = if esp_button2_pressed {
-                                let (destination, min_zone) =
-                                    aim.aim_smooth(&bboxes, &crosshair, &mut random).unwrap();
-                                (destination, min_zone * config.scale_min_zone2)
-                            } else {
-                                let (destination, min_zone) =
-                                    aim.aim(&bboxes, &crosshair, &mut random).unwrap();
-                                (destination, min_zone * config.scale_min_zone1)
-                            };
+                            let (profile_index, profile) =
+                                config.profile_for(esp_button2_pressed);
+                            if profile_index != last_profile {
+                                last_profile = profile_index;
+                                tracing::info!(
+                                    "[Profile] {} -> {:?} (mover {}, fov {}, scale_min_zone {}, aim {})",
+                                    profile_index,
+                                    profile.name,
+                                    profile.mover,
+                                    profile.fov,
+                                    profile.scale_min_zone,
+                                    match profile.aim_mode {
+                                        Some(mode) => format!("{mode:?}"),
+                                        None => format!("{aim} (runtime)"),
+                                    }
+                                );
+                            }
+                            let (destination, min_zone) = match profile.aim_mode {
+                                Some(mode) => {
+                                    aim.aim_as(mode, &bboxes, &crosshair, &mut random)
+                                }
+                                None => aim.aim(&bboxes, &crosshair, &mut random),
+                            }
+                            .unwrap();
+                            let min_zone = min_zone * profile.scale_min_zone;
                             let dist = destination.l2_distance(&crosshair).sqrt();
 
                             #[cfg(not(feature = "disable-mouse"))]
-                            if dist > min_zone && dist <= config.fov {
+                            if dist > min_zone && dist <= profile.fov {
                                 let (dx, dy) = mouse_counts(
                                     (
                                         destination.x() - crosshair.x(),
@@ -274,17 +308,14 @@ fn main() -> Result<()> {
                                         || esp_button2_pressed
                                         || mouse.is_side4_pressing()))
                                     || (!use_trigger);
-                                // aim_smooth (esp button 2) always moves like a
-                                // hand; the ordinary modes do when MOVE_SMOOTH
-                                // is on.
-                                let use_smooth = esp_button2_pressed || config.move_smooth;
                                 if fire {
                                     // Overwrites whatever the worker has not
                                     // started yet. A queued aim describes where
                                     // the target was a frame ago, so the newest
                                     // one is the only one worth playing.
-                                    move_queue.force_push(if use_smooth {
-                                        MoveRequest::Smooth {
+                                    move_queue.force_push(match profile.mover {
+                                        Mover::Smooth => MoveRequest::Smooth {
+                                            profile: profile_index,
                                             delta: (dx, dy),
                                             reach_px: dist * px_scale,
                                             // Fitts's W is the target's full
@@ -294,9 +325,8 @@ fn main() -> Result<()> {
                                             // add a whole bit of difficulty and
                                             // make every flick a slope longer.
                                             width_px: 2. * min_zone * px_scale,
-                                        }
-                                    } else {
-                                        MoveRequest::Bezier { delta: (dx, dy) }
+                                        },
+                                        Mover::Bezier => MoveRequest::Bezier { delta: (dx, dy) },
                                     });
                                 }
                             }

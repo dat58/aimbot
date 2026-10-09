@@ -15,14 +15,26 @@ Two machines:
 A capture card attached directly to PC2 replaces the NDI/UDP hop entirely; see
 [Capture from a capture card](#capture-from-a-capture-card).
 
+## Configure
+
+```
+cp config.example.toml config.toml
+cargo run -r --bin aimbot            # reads ./config.toml
+cargo run -r --bin aimbot -- --config other.toml
+```
+
+Every setting lives in that file; see
+[Configuration reference](#configuration-reference). The Docker image reads
+`config.docker.toml`, which `docker-compose.yml` mounts at `/app/config.toml`.
+
 ## Frame sources
 
-`SOURCE_STREAM` picks the source by prefix:
+`source_stream` picks the source by prefix:
 
-| `SOURCE_STREAM` | Source |
+| `source_stream` | Source |
 | --- | --- |
 | `ndi://172.24.36.133` | NDI. Comma-separate several addresses to add more discovery targets. |
-| `elgato://` or `v4l2://` | Capture card on `CAPTURE_DEVICE` |
+| `elgato://` or `v4l2://` | Capture card on `capture_device` |
 | `elgato:///dev/video1` | Capture card on the named node |
 | anything else | Passed to FFmpeg as a URL (UDP/RTSP/...) |
 
@@ -46,12 +58,12 @@ Letterboxed preprocess (`INTER_LINEAR`, padded with 114), two classes:
 `v_light_192_fp16_onnx.onnx` (from the capfkaplus repo) needs a different
 preprocess and output decode, both of which live in `impl Model` in
 `src/model.rs` next to the existing path. The code is written against
-`MODEL_INPUT_SIZE` and the runtime output shape, so the sibling `v_light_256`
-works the same way with nothing but a different `MODEL_PATH` and
-`MODEL_INPUT_SIZE`:
+`model_input_size` and the runtime output shape, so the sibling `v_light_256`
+works the same way with nothing but a different `model_path` and
+`model_input_size`:
 
 - **Preprocess** (`preprocess_light`) — nearest-neighbour stretch of the region
-  into `MODEL_INPUT_SIZE` square with **no letterbox and no padding**, matching
+  into `model_input_size` square with **no letterbox and no padding**, matching
   capfkaplus: each axis gets its own scale. Then BGR to RGB, NCHW, `1/255`.
   Nearest neighbour rather than bilinear because that is how the graph was
   exported.
@@ -59,11 +71,11 @@ works the same way with nothing but a different `MODEL_PATH` and
   `[1, 4 + classes, N]`: `cx, cy, w, h` in model-input pixels followed by one
   score per class, with no objectness channel and no NMS inside the graph.
   Boxes are multiplied by the inverse per-axis factor
-  (`sx = REGION_WIDTH / MODEL_INPUT_SIZE`,
-  `sy = REGION_HEIGHT / MODEL_INPUT_SIZE`), then the existing per-class
-  `non_max_suppression` runs on `MODEL_IOU`, exactly as on the two-class path.
+  (`sx = region_width / model_input_size`,
+  `sy = region_height / model_input_size`), then the existing per-class
+  `non_max_suppression` runs on `model_iou`, exactly as on the two-class path.
 
-  Nothing is baked in: the input side comes from `MODEL_INPUT_SIZE`, and the
+  Nothing is baked in: the input side comes from `model_input_size`, and the
   channel and candidate counts are read from the output shape at run time
   (`[1, 9, 756]` for `v_light_192`, `[1, 9, 1344]` for `v_light_256`).
 
@@ -81,13 +93,13 @@ The path is selected by the model file name — a name starting with `v_light`
 switches it on, anything else keeps the letterboxed two-class path:
 
 ```shell
-MODEL_PATH=/app/assets/v_light_192_fp16_onnx.onnx
-MODEL_INPUT_SIZE=192
+model_path=/app/assets/v_light_192_fp16_onnx.onnx
+model_input_size=192
 ```
 
-`MODEL_INPUT_SIZE` must match what the graph declares — 192 for `v_light_192`,
+`model_input_size` must match what the graph declares — 192 for `v_light_192`,
 256 for `v_light_256` — otherwise ONNX Runtime rejects the input tensor shape.
-`MODEL_CONF_BODY`, `MODEL_CONF_HEAD` and `MODEL_IOU` apply unchanged. Despite
+`model_conf_body`, `model_conf_head` and `model_iou` apply unchanged. Despite
 the `_fp16_` in the file name the graph has **float32** inputs and outputs — the
 name refers to how the weights were exported.
 
@@ -189,16 +201,16 @@ to register is only a warning in the log.
 ### Configuration
 
 ```shell
-MODEL_PROVIDER=openvino
-OPENVINO_DEVICE_TYPE=CPU     # or GPU / NPU / GPU.0 ...
-OPENVINO_CACHE_DIR=/app/assets
-INTRA_THREADS=1
+model_provider=openvino
+openvino_device_type=CPU     # or GPU / NPU / GPU.0 ...
+openvino_cache_dir=/app/assets
+intra_threads=1
 ```
 
-`OPENVINO_DEVICE_TYPE=GPU` needs `/dev/dri` passed into the container; the GPU
+`openvino_device_type = "GPU"` needs `/dev/dri` passed into the container; the GPU
 and NPU plugins are already in the image.
 
-Median of 4 runs on a Xeon 8358P, `INTRA_THREADS=1`, 1920x1080 input, provider
+Median of 4 runs on a Xeon 8358P, `intra_threads = 1`, 1920x1080 input, provider
 confirmed registered:
 
 | Model | Provider | ONNX Runtime / OpenVINO | inference |
@@ -222,7 +234,7 @@ on the host. OpenVINO does not.
 
 ## Capture from a capture card
 
-Set `SOURCE_STREAM=elgato://` (or `v4l2://`) to read frames straight from the
+Set `source_stream = "elgato://"` (or `v4l2://`) to read frames straight from the
 card's `/dev/videoN` node instead of over NDI/UDP. Tested against an Elgato
 4K X, but nothing in the path is model-specific — any UVC card works.
 
@@ -250,17 +262,17 @@ The only requirement is handing the node to the container:
       - "/dev/video0:/dev/video0"
 ```
 
-| Variable | Default | Meaning |
+| Key | Default | Meaning |
 | --- | --- | --- |
-| `CAPTURE_DEVICE` | `/dev/video0` | V4L2 node |
-| `CAPTURE_WIDTH` | `1920` | Requested capture width |
-| `CAPTURE_HEIGHT` | `1080` | Requested capture height |
-| `CAPTURE_FPS` | `60` | Requested frame rate; `0` leaves the device default |
-| `CAPTURE_FOURCC` | (negotiated) | Pin a pixel format: `NV12`, `YU12`, `YUYV`, `UYVY`, `BGR3`, `RGB3`, `AR24`, `MJPG` |
-| `CAPTURE_BUFFERS` | `3` | MMAP ring size; 2 is the minimum the kernel accepts |
-| `CAPTURE_DROP_STALE` | `true` | Drain the driver queue each grab and keep only the newest frame |
-| `CAPTURE_TIMEOUT_MS` | `1000` | Grab timeout before the stream is treated as lost |
-| `CAPTURE_OUTPUT` | `bgr` | `bgr` converts for the detection pipeline; `raw` hands back the untouched device bytes |
+| `capture_device` | `/dev/video0` | V4L2 node |
+| `capture_width` | `1920` | Requested capture width |
+| `capture_height` | `1080` | Requested capture height |
+| `capture_fps` | `60` | Requested frame rate; `0` leaves the device default |
+| `capture_fourcc` | (negotiated) | Pin a pixel format: `NV12`, `YU12`, `YUYV`, `UYVY`, `BGR3`, `RGB3`, `AR24`, `MJPG` |
+| `capture_buffers` | `3` | MMAP ring size; 2 is the minimum the kernel accepts |
+| `capture_drop_stale` | `true` | Drain the driver queue each grab and keep only the newest frame |
+| `capture_timeout_ms` | `1000` | Grab timeout before the stream is treated as lost |
+| `capture_output` | `bgr` | `bgr` converts for the detection pipeline; `raw` hands back the untouched device bytes |
 
 What keeps the latency down:
 
@@ -277,8 +289,8 @@ What keeps the latency down:
   16-bit packed ones and puts MJPEG last, because bytes on the wire are latency
   on a USB card and MJPEG adds a decode pass on top of the transfer.
 
-With `CAPTURE_OUTPUT=bgr` there is exactly one pass over the pixels
-(`cvtColor`). `CAPTURE_OUTPUT=raw` skips even that and is the lowest-latency
+With `capture_output = "bgr"` there is exactly one pass over the pixels
+(`cvtColor`). `capture_output = "raw"` skips even that and is the lowest-latency
 mode available, but the frames are then in the device's native layout — NV12 for
 example arrives as `height * 3 / 2` rows of single-channel data — and the
 detection pipeline expects BGR, so `raw` is for measurement and for consumers
@@ -292,9 +304,9 @@ listener is reachable on the host's address directly.
 
 ```yaml
     devices:
-      - "/dev/ttyACM0:/dev/ttyACM0"   # MAKCU_PORT
-      - "/dev/video0:/dev/video0"     # CAPTURE_DEVICE, capture-card source only
-      - "/dev/dri:/dev/dri"           # OPENVINO_DEVICE_TYPE=GPU only
+      - "/dev/ttyACM0:/dev/ttyACM0"   # makcu_port
+      - "/dev/video0:/dev/video0"     # capture_device, capture-card source only
+      - "/dev/dri:/dev/dri"           # openvino_device_type=GPU only
 ```
 
 The container runs as root, so it can open those nodes as-is. To reach them as
@@ -312,7 +324,7 @@ sudo ufw allow 10000/tcp
 
 The listener serves `GET /health`, `GET /stream/status`,
 `GET /stream/board` (the board controller UI) and
-`PUT /stream/event/{id}`, bound to `0.0.0.0:$EVENT_LISTENER_PORT`.
+`PUT /stream/event/{id}`, bound to `0.0.0.0:$event_listener_port`.
 
 ## Mouse movement
 
@@ -325,22 +337,26 @@ A mouse delta is played one of two ways:
 
 ### Which one is used
 
-| Situation | Target chosen by | Movement |
-| --- | --- | --- |
-| ESP button 2 held | `aim_smooth` | **always** `move_smooth` |
-| Otherwise | the current aim mode | `move_smooth` when `MOVE_SMOOTH=true`, else `move_bezier` |
+The profile decides. Which profile is in play depends on the ESP button:
 
-`aim_smooth` chooses its target exactly like the Horizon mode: x goes straight
-to the centre of the box, while y is only nudged toward it a random amount each
-frame instead of being snapped onto it — up to 21 px down when the crosshair is
-above the box, up to 11 px up toward a head box or 21 px toward a body box when
-it is below, and −14 to +7 px when it is already level with a body box. Level
-with a head box, it aims straight at the head. It
-ignores `MOVE_SMOOTH` — the hand-like movement is the point of that path — and
-uses `SCALE_MIN_ZONE2`.
+| Situation | Profile | Target chosen by | Movement |
+| --- | --- | --- | --- |
+| ESP button 2 held | `esp_button_2_profile` | the profile's `aim_mode`, else the runtime mode | the profile's `mover` |
+| Everything else — ESP button 1, MAKCU side 4, no-trigger auto aim | `esp_button_1_profile` | same | same |
 
-`MOVE_SMOOTH` defaults to `false`, so the ordinary modes keep the firmware
-bezier unless you opt in. It is read at startup; changing it needs a restart.
+`mover` defaults to `"smooth"`, so a profile that says nothing gets the
+human-flick model. Setting `mover = "bezier"` hands the whole delta to the
+firmware instead, and that path never auto-clicks.
+
+Setting `aim_mode = "horizon"` reproduces what used to be hard-wired to ESP
+button 2. Horizon sends x straight to the centre of the box, while y is only
+nudged toward it a random amount each frame instead of being snapped onto it —
+up to 21 px down when the crosshair is above the box, up to 11 px up toward a
+head box or 21 px toward a body box when it is below, and −14 to +7 px when it
+is already level with a body box. Level with a head box, it aims straight at the
+head.
+
+Profiles are read at startup; changing one needs a restart.
 
 ### What a flick models
 
@@ -363,23 +379,23 @@ bezier unless you opt in. It is read at startup; changing it needs a restart.
 Every number below can be worked out by hand, which is the quickest way to
 predict how a setting will feel before trying it.
 
-1. **Engagement.** A flick is planned only when `min_zone < dist ≤ FOV`, both
+1. **Engagement.** A flick is planned only when `min_zone < dist ≤ fov`, both
    in frame pixels. `min_zone` is roughly half the target box, times
-   `SCALE_MIN_ZONE1`. With ESP button 2 held it is `aim_smooth`'s zone — half
+   `scale_min_zone`. With ESP button 2 held it is `aim_smooth`'s zone — half
    the box *width*, or half its larger side when the crosshair is level with
-   a head box — times `SCALE_MIN_ZONE2`.
+   a head box — times `scale_min_zone`.
 
 2. **Size, in mouse counts.**
 
    ```text
-   counts = dist × frame_to_screen × 96 / GAME_SENS / MOUSE_DPI
+   counts = dist × frame_to_screen × 96 / game_sens / mouse_dpi
    ```
 
-   `FOV` therefore caps every flick. At `MOUSE_DPI=1000`, `GAME_SENS=1.0`, a
-   35 px FOV means no flick is ever larger than 3.4 counts.
+   `fov` therefore caps every flick. At `mouse_dpi = 1000`, `game_sens = 1.0`, a
+   35 px fov means no flick is ever larger than 3.4 counts.
 
-3. **Ballistic gain.** The flick commits to `MOVE_SMOOTH_GAIN` of that, ±4.5%.
-   A share `MOVE_SMOOTH_OVERSHOOT_P` of flicks overshoot to about 106% instead.
+3. **Ballistic gain.** The flick commits to `move_smooth_gain` of that, ±4.5%.
+   A share `move_smooth_overshoot_p` of flicks overshoot to about 106% instead.
    What is left over is the next frame's job.
 
 4. **Duration (Fitts).** In screen pixels:
@@ -391,8 +407,8 @@ predict how a setting will feel before trying it.
 
    then ±12% lognormal jitter, then clamped to `[MIN_MS, MAX_MS]`.
 
-5. **Reports.** `MT × POLL_HZ / 1000` of them (at least 2, at most 512), one
-   every `1 / POLL_HZ`. Only reports that actually move are written to the
+5. **Reports.** `MT × poll_hz / 1000` of them (at least 2, at most 512), one
+   every `1 / poll_hz`. Only reports that actually move are written to the
    serial port, so **commands on the wire ≈ counts, not reports**.
 
 6. **Blocking.** The aim thread is busy for the whole of `MT`. That — not the
@@ -401,12 +417,12 @@ predict how a setting will feel before trying it.
 A rule of thumb for how fast each path can follow a moving target:
 
 ```text
-smooth  ≈ 0.9 × FOV / MT   px/s
-bezier  ≈ FOV × fps        px/s
+smooth  ≈ 0.9 × fov / MT   px/s
+bezier  ≈ fov × fps        px/s
 ```
 
-**Worked example** — `FOV=35`, `MOUSE_DPI=1000`, `GAME_SENS=1.0`,
-`MAKCU_BAUD=4000000`, a target whose `min_zone` is 21 px:
+**Worked example** — `fov = 35`, `mouse_dpi = 1000`, `game_sens = 1.0`,
+`makcu_baud=4000000`, a target whose `min_zone` is 21 px:
 
 | Step | Value |
 | --- | --- |
@@ -416,9 +432,9 @@ bezier  ≈ FOV × fps        px/s
 | reports at 1000 Hz | 113, of which about **3** are written — 60 bytes, 0.13% of the link |
 | tracking | 0.9 × 35 / 0.113 ≈ **280 px/s**, against 2100 px/s for bezier at 60 fps |
 
-That last line is the one that matters at a tight FOV: the default timing is
+That last line is the one that matters at a tight fov: the default timing is
 calibrated for full flicks, and it makes corrections ten times slower than
-bezier. The [tight-FOV preset](#presets) fixes most of that.
+bezier. The [tight-fov preset](#presets) fixes most of that.
 
 ### Settings
 
@@ -426,13 +442,13 @@ All optional. Every value here is read once at startup.
 
 #### Timing — how fast it feels
 
-| Variable | Default | Effect |
+| Key | Default | Effect |
 | --- | --- | --- |
-| `MOVE_SMOOTH_FITTS_A_MS` | `35` | Fixed cost of every flick. **Dominates at a small FOV**, where the index of difficulty is only 1–2.5 bits. Lower it first when aim feels slow. |
-| `MOVE_SMOOTH_FITTS_B_MS` | `55` | Cost per bit of difficulty. Dominates on long flicks. |
-| `MOVE_SMOOTH_MIN_MS` | `45` | Floor on `MT`. Lower it together with `FITTS_A_MS`, or it binds and the change does nothing. |
-| `MOVE_SMOOTH_MAX_MS` | `320` | Ceiling on `MT`, for the longest flicks. |
-| `MOVE_SMOOTH_POLL_HZ` | `0` | Report cadence. `0` picks 1000 Hz at `MAKCU_BAUD` ≥ 2M and 250 Hz below. **Does not change `MT`**; see [Choosing POLL_HZ](#choosing-poll_hz). |
+| `move_smooth_fitts_a_ms` | `35` | Fixed cost of every flick. **Dominates at a small fov**, where the index of difficulty is only 1–2.5 bits. Lower it first when aim feels slow. |
+| `move_smooth_fitts_b_ms` | `55` | Cost per bit of difficulty. Dominates on long flicks. |
+| `move_smooth_min_ms` | `45` | Floor on `MT`. Lower it together with `fitts_a_ms`, or it binds and the change does nothing. |
+| `move_smooth_max_ms` | `320` | Ceiling on `MT`, for the longest flicks. |
+| `move_smooth_poll_hz` | `0` | Report cadence. `0` picks 1000 Hz at `makcu_baud` ≥ 2M and 250 Hz below. **Does not change `MT`**; see [Choosing poll_hz](#choosing-poll_hz). |
 
 #### Report density — why a flick can look like it is not moving
 
@@ -441,16 +457,16 @@ and moves nothing. Fitts sizes a flick in *time*, and at 1 kHz a 190 ms flick is
 190 reports — right for the hundreds of counts a full-screen flick carries, and
 badly wrong for an in-region correction, which is a handful.
 
-| Variable | Default | Effect |
+| Key | Default | Effect |
 | --- | --- | --- |
-| `MOVE_SMOOTH_COUNTS_PER_REPORT` | `2.0` | Mean counts one report carries, which caps how many reports a flick is worth planning. Below `1` most reports go empty again; raise it for fewer, larger reports. **Does not change the duration** — the reports spread out instead. |
-| `MOVE_SMOOTH_MIN_SPEED_IPS` | `0.6` | Slowest the hand is allowed to travel, inches per second. Below a few hundred counts **this is what sets the duration**, not Fitts. |
-| `MOVE_SMOOTH_MAX_SPEED_IPS` | `40` | Fastest. Rarely binds; it stops a huge flick becoming a teleport. |
+| `move_smooth_counts_per_report` | `2.0` | Mean counts one report carries, which caps how many reports a flick is worth planning. Below `1` most reports go empty again; raise it for fewer, larger reports. **Does not change the duration** — the reports spread out instead. |
+| `move_smooth_min_speed_ips` | `0.6` | Slowest the hand is allowed to travel, inches per second. Below a few hundred counts **this is what sets the duration**, not Fitts. |
+| `move_smooth_max_speed_ips` | `40` | Fastest. Rarely binds; it stops a huge flick becoming a teleport. |
 
 Fitts's index of difficulty is a *ratio* of distance to width, so it is the same
 for a 5-count flick and a 5000-count one and says nothing about how far the hand
-moves. `counts / MOUSE_DPI` does — it is inches. The speed envelope is expressed
-in inches precisely so it holds at any `MOUSE_DPI` and `GAME_SENS` without
+moves. `counts / mouse_dpi` does — it is inches. The speed envelope is expressed
+in inches precisely so it holds at any `mouse_dpi` and `game_sens` without
 retuning, since neither is a knob you get to pick.
 
 Fitts describes *aimed* reaches, where landing accurately is the cost. A
@@ -458,7 +474,7 @@ correction far too small for that just travels at the hand's comfortable speed,
 which makes its duration proportional to its length — Fitts's law is known to
 flatten out at very low indices of difficulty for the same reason.
 
-Measured at `GAME_SENS=0.38`, `MOUSE_DPI=1000` on a real MAKCU:
+Measured at `game_sens = 0.38`, `mouse_dpi = 1000` on a real MAKCU:
 
 | Reach | Counts | Reports | Duration |
 | --- | --- | --- | --- |
@@ -468,30 +484,30 @@ Measured at `GAME_SENS=0.38`, `MOUSE_DPI=1000` on a real MAKCU:
 
 #### Accuracy
 
-| Variable | Default | Effect |
+| Key | Default | Effect |
 | --- | --- | --- |
-| `MOVE_SMOOTH_GAIN` | `0.90` | Share of the distance one flick covers. Toward `1.0`: lands closer, fewer corrections, faster tracking, less human. Much below `0.8`, corrections pile up. |
-| `MOVE_SMOOTH_OVERSHOOT_P` | `0.15` | Share of flicks that overshoot and reverse on the correction. `0` never overshoots; people sit around `0.10`–`0.20`. |
+| `move_smooth_gain` | `0.90` | Share of the distance one flick covers. Toward `1.0`: lands closer, fewer corrections, faster tracking, less human. Much below `0.8`, corrections pile up. |
+| `move_smooth_overshoot_p` | `0.15` | Share of flicks that overshoot and reverse on the correction. `0` never overshoots; people sit around `0.10`–`0.20`. |
 
 #### Shape — how the path looks
 
-| Variable | Default | Effect |
+| Key | Default | Effect |
 | --- | --- | --- |
-| `MOVE_SMOOTH_PEAK_MIN` / `_PEAK_MAX` | `0.30` / `0.45` | Where along the flick speed peaks. Clamped to `0.20`–`0.60`. Near `0.5` it turns into the symmetric bell that no hand produces. |
-| `MOVE_SMOOTH_BOW` | `0.03` | Largest sideways deviation, as a fraction of the flick. `0` is a straight line; people sit around `0.01`–`0.05`. |
-| `MOVE_SMOOTH_NOISE` | `0.022` | Motor noise proportional to speed. Never moves the endpoint. |
-| `MOVE_SMOOTH_TREMOR` | `0.35` | Tremor amplitude, in counts. `0` disables it. Never moves the endpoint. |
+| `move_smooth_peak_min` / `_PEAK_MAX` | `0.30` / `0.45` | Where along the flick speed peaks. Clamped to `0.20`–`0.60`. Near `0.5` it turns into the symmetric bell that no hand produces. |
+| `move_smooth_bow` | `0.03` | Largest sideways deviation, as a fraction of the flick. `0` is a straight line; people sit around `0.01`–`0.05`. |
+| `move_smooth_noise` | `0.022` | Motor noise proportional to speed. Never moves the endpoint. |
+| `move_smooth_tremor` | `0.35` | Tremor amplitude, in counts. `0` disables it. Never moves the endpoint. |
 
-At a small FOV the whole flick is a few counts, so `BOW` and `NOISE` mostly
-round away below one count. `TREMOR` is an absolute amount rather than a
+At a small fov the whole flick is a few counts, so `bow` and `noise` mostly
+round away below one count. `tremor` is an absolute amount rather than a
 fraction, so it is the one shape setting that still shows there; set it to
 `0` if you see a stray sideways count in the middle of a flick.
 
 #### Reaction latency
 
-| Variable | Default | Effect |
+| Key | Default | Effect |
 | --- | --- | --- |
-| `MOVE_SMOOTH_REACT_MIN_MS` / `_MAX_MS` | `0` / `0` | Wait before the first flick at a fresh target, drawn uniformly from the range. |
+| `move_smooth_react_min_ms` / `_MAX_MS` | `0` / `0` | Wait before the first flick at a fresh target, drawn uniformly from the range. |
 
 Off by default: in trigger mode a command only leaves this process while the
 ESP trigger button is held, so the operator's own finger already supplies a
@@ -506,20 +522,23 @@ re-reacts after every pause, not only on a new target.
 ### Auto click
 
 Fires a left click once a flick has been played. Only the `move_smooth` path
-does this, so with `MOVE_SMOOTH` unset that means ESP button 2 only. The click
+does this, so a profile with `mover = "bezier"` never auto-clicks. The click
 runs on the mouse worker thread, so the aim loop never blocks on it.
 
-| Variable | Default | Effect |
+Each profile keeps its own click timestamp, so the rate limit below is counted
+per profile rather than across the whole session.
+
+| Key | Default | Effect |
 | --- | --- | --- |
-| `MOVE_SMOOTH_AUTO_CLICK` | `false` | Turn it on. |
-| `MOVE_SMOOTH_AUTO_CLICK_LOWER_MS` / `_UPPER_MS` | `100` / `130` | Wait between the flick ending and the click, drawn uniformly. Stands in for deciding to shoot. |
-| `MOVE_SMOOTH_AUTO_CLICK_RATE_LIMIT` | `0` | Smallest gap between two clicks, ms. `0` is no limit. |
-| `MOVE_SMOOTH_AUTO_CLICK_MISS_P` | `0.0` | Chance in `[0, 1]` the shot is fired without letting the aim settle — a deliberate miss. |
+| `move_smooth_auto_click` | `false` | Turn it on. |
+| `move_smooth_auto_click_lower_ms` / `_UPPER_MS` | `100` / `130` | Wait between the flick ending and the click, drawn uniformly. Stands in for deciding to shoot. |
+| `move_smooth_auto_click_rate_limit_ms` | `0` | Smallest gap between two clicks, ms. `0` is no limit. |
+| `move_smooth_auto_click_miss_p` | `0.0` | Chance in `[0, 1]` the shot is fired without letting the aim settle — a deliberate miss. |
 
 **Rate limit.** Without one, a held trigger clicks once per flick and a flick is
 planned once per frame, so the rate is whatever the delay above works out to:
 
-| `RATE_LIMIT` | Clicks/s | Gap | Cycles that skip the click |
+| `rate_limit` | Clicks/s | Gap | Cycles that skip the click |
 | --- | --- | --- | --- |
 | `0` | 5.80 | 172 ms | 0% |
 | `250` | 3.90 | 256 ms | 87% |
@@ -533,16 +552,16 @@ which is why a limit makes the aim *smoother*, not slower. Pick by weapon: `0`
 for automatic, `150`–`250` for semi-auto, `800`–`1500` for a sniper.
 
 **Miss probability.** Both outcomes wait out the same
-`LOWER_MS`–`UPPER_MS`; what separates them is whether the mouse keeps correcting
+`lower_ms`–`upper_ms`; what separates them is whether the mouse keeps correcting
 during that wait:
 
-| `MISS_P` outcome | During the wait | Result |
+| `miss_p` outcome | During the wait | Result |
 | --- | --- | --- |
 | miss | holds still | the crosshair keeps the ballistic error, so the shot misses |
 | hit | plays the corrections still arriving | the crosshair is on target when it fires |
 
-The error it keeps is what `MOVE_SMOOTH_GAIN` left behind, measured over 4000
-flicks at `GAME_SENS=0.38` against a ~20 px target:
+The error it keeps is what `move_smooth_gain` left behind, measured over 4000
+flicks at `game_sens = 0.38` against a ~20 px target:
 
 | Reach | Residual p50 | Residual p90 | Overshot |
 | --- | --- | --- | --- |
@@ -552,46 +571,46 @@ flicks at `GAME_SENS=0.38` against a ~20 px target:
 
 So a miss only really misses on a long flick; a 20 px correction lands on target
 either way. Worth setting above zero regardless — never missing is itself a
-signature. Not to be confused with `MOVE_SMOOTH_OVERSHOOT_P`, which decides
+signature. Not to be confused with `move_smooth_overshoot_p`, which decides
 whether a *movement* goes past its target rather than whether a *shot* does.
 
-### Choosing POLL_HZ
+### Choosing poll_hz
 
-| `MAKCU_BAUD` | Wire time per command | Rate picked by `0` |
+| `makcu_baud` | Wire time per command | Rate picked by `0` |
 | --- | --- | --- |
 | `115200` | 1.56 ms | 250 Hz |
 | `2000000` | 90 µs | 1000 Hz |
 | `4000000` | 45 µs | 1000 Hz |
 
-`POLL_HZ` decides how finely the speed profile is sampled, not how long the
+`poll_hz` decides how finely the speed profile is sampled, not how long the
 flick lasts. What matters is how many counts a flick carries against how many
 slots it gets, so work out the largest flick first:
 
 ```text
-max counts = FOV × frame_to_screen × 96 / GAME_SENS / MOUSE_DPI
+max counts = fov × frame_to_screen × 96 / game_sens / mouse_dpi
 ```
 
 - **Up to ~4 counts:** `250` is free — same timing on the wire as 1000 Hz, four
   times fewer thread wake-ups. At 2M and 4M the automatic choice is 1000 Hz, so
   this has to be set by hand.
 - **More than that:** leave it at `0`. At 250 Hz a short flick has so few slots
-  that counts pile up into a single report. With `GAME_SENS=0.38`,
-  `MOUSE_DPI=1000` and `FOV=35` (8.8 counts), a 53 ms flick gets 13 slots at
+  that counts pile up into a single report. With `game_sens = 0.38`,
+  `mouse_dpi = 1000` and `fov = 35` (8.8 counts), a 53 ms flick gets 13 slots at
   250 Hz and its biggest report jumps 8.1 px; at 1000 Hz it gets 53 slots and
   no report exceeds one count (4.2 px).
 - **Never above 1000.** No real mouse reports faster, so a higher rate is a
   signature in itself.
-- **Keep `POLL_HZ × MAX_MS` ≤ 512 000.** A flick holds at most 512 reports;
+- **Keep `poll_hz × MAX_MS` ≤ 512 000.** A flick holds at most 512 reports;
   past that the longest flicks get cut short.
 
 ### Presets
 
-| Variable | Tight FOV (≤ ~50 px) | Default (wide FOV) |
+| Variable | Tight fov (≤ ~50 px) | Default (wide fov) |
 | --- | --- | --- |
-| `MOVE_SMOOTH_POLL_HZ` | `250` if flicks are ≤ ~4 counts, else `0` | `0` |
-| `MOVE_SMOOTH_FITTS_A_MS` | `14` | `35` |
-| `MOVE_SMOOTH_FITTS_B_MS` | `22` | `55` |
-| `MOVE_SMOOTH_MIN_MS` | `22` | `45` |
+| `move_smooth_poll_hz` | `250` if flicks are ≤ ~4 counts, else `0` | `0` |
+| `move_smooth_fitts_a_ms` | `14` | `35` |
+| `move_smooth_fitts_b_ms` | `22` | `55` |
+| `move_smooth_min_ms` | `22` | `45` |
 
 Everything else stays at its default in both.
 
@@ -610,7 +629,7 @@ Everything else stays at its default in both.
 
 `mouse_test latency` measures how long a mouse move takes to show up in the
 frames the aimbot receives — MAKCU, the game, rendering, capture and transport
-together. It opens the same `SOURCE_STREAM` the aimbot does.
+together. It opens the same `source_stream` the aimbot does.
 
 1. Stop the aimbot; the serial port can only have one owner.
 2. In game, stand still facing a detailed, static surface — a textured wall,
@@ -642,163 +661,215 @@ textured surface or pass a larger count.
 
 Median `MT` for a body-sized target (`W` = 64 px):
 
-| Distance | Tight FOV | Default |
+| Distance | Tight fov | Default |
 | --- | --- | --- |
 | 35 px | 37 ms | 94 ms |
 | 60 px | 48 ms | 119 ms |
 | 180 px | 74 ms | 185 ms |
 | 600 px | 109 ms | 272 ms |
 
-Measured at `FOV=35`, `MOUSE_DPI=1000`, `GAME_SENS=1.0`, 4M baud, over the
+Measured at `fov = 35`, `mouse_dpi = 1000`, `game_sens = 1.0`, 4M baud, over the
 range of `min_zone` a target actually produces:
 
-| | Tight FOV | Default |
+| | Tight fov | Default |
 | --- | --- | --- |
 | `MT` | 39–66 ms | 98–166 ms |
 | Reports scheduled | 10–17 | 98–166 |
 | Commands written | 1–3 | 1–3.5 |
 | Tracking | 240–700 px/s | 95–280 px/s |
 
-Be clear about what the tight-FOV preset gives up. A person takes roughly
+Be clear about what the tight-fov preset gives up. A person takes roughly
 80–150 ms over a 10–35 px correction, so 39–66 ms is *faster than a hand*. The
 speed profile, the undershoot, the curvature and the sub-count carry are all
 still there; the duration just no longer follows human Fitts constants. That is
-a reasonable trade at a tight FOV, where the alternative is falling behind
+a reasonable trade at a tight fov, where the alternative is falling behind
 every strafing target.
 
 ### Tuning procedure
 
-1. **Get `MOUSE_DPI` and `GAME_SENS` right first.** Every flick is sized in
+1. **Get `mouse_dpi` and `game_sens` right first.** Every flick is sized in
    counts derived from them, so a wrong value makes each one the wrong size and
    no smooth setting can compensate. Both must be above zero; startup panics
    otherwise.
-2. **Pick a preset from your FOV.**
+2. **Pick a preset from your fov.**
 3. **Check the device keeps up.** Run `mouse_test`, type `s` at the `dx`
    prompt to switch paths, and compare the planned duration with the measured
    one it prints. Measured consistently longer than planned means the host or
-   the MAKCU cannot hold the cadence — lower `MOVE_SMOOTH_POLL_HZ`.
-4. **A/B in game.** Run with `MOVE_SMOOTH=false` and compare a normal shot
-   (bezier) with the same shot while holding ESP button 2 (always smooth) —
-   bearing in mind that button 2 also changes the target to the Horizon-style
-   one. For a like-for-like comparison, restart with `MOVE_SMOOTH=true`.
+   the MAKCU cannot hold the cadence — lower `move_smooth_poll_hz`.
+4. **A/B in game.** Give one profile `mover = "bezier"` and the other
+   `mover = "smooth"`, keeping every other key identical, and compare the same
+   shot under each ESP button. Leaving `aim_mode` unset in both keeps the target
+   choice identical, which is what makes the comparison about the movement.
 5. **Adjust one symptom at a time:**
 
    | Symptom | Change |
    | --- | --- |
-   | Slow, falls behind moving targets | Lower `FITTS_A_MS`, with `MIN_MS` alongside; then `FITTS_B_MS` |
-   | Lands short, needs several nudges | Raise `GAIN` toward `1.0` |
-   | Wobbles, reverses too often | Lower `OVERSHOOT_P` |
-   | Stray sideways counts | `TREMOR=0` |
-   | Too uniform, looks mechanical | Raise `FITTS_A_MS` / `FITTS_B_MS`, keep `PEAK_*` off 0.5 |
+   | Slow, falls behind moving targets | Lower `fitts_a_ms`, with `min_ms` alongside; then `fitts_b_ms` |
+   | Lands short, needs several nudges | Raise `gain` toward `1.0` |
+   | Wobbles, reverses too often | Lower `overshoot_p` |
+   | Stray sideways counts | `move_smooth_tremor = 0` |
+   | Too uniform, looks mechanical | Raise `fitts_a_ms` / `fitts_b_ms`, keep `move_smooth_peak_*` off 0.5 |
 
-### Fixed in code
+### Rarely touched
 
-These are not exposed as environment variables. Change
-`SmoothConfig::default()` in `src/config.rs` if you need to.
+Settable in a `[[profile]]` like the rest, but left alone unless you have a
+reason. The defaults live in `SmoothConfig::default()` in `src/config.rs`.
 
-| Field | Default | Effect |
+| Key | Default | Effect |
 | --- | --- | --- |
-| `mt_jitter` | `0.12` | Spread of the movement time between flicks |
-| `gain_sd` | `0.045` | Spread of the ballistic gain |
-| `curve_bias` | `0.30` | How strongly the bow direction follows the direction of travel; `0` is a coin flip |
-| `kappa_min` / `kappa_max` | `0.85` / `1.25` | Where along the path the bow peaks |
-| `gap_ms` | `250` | Silence that counts as a fresh target |
-| `max_counts` | `127` | Ceiling on one report; the excess is deferred, never dropped |
+| `move_smooth_mt_jitter` | `0.12` | Spread of the movement time between flicks |
+| `move_smooth_gain_sd` | `0.045` | Spread of the ballistic gain |
+| `move_smooth_curve_bias` | `0.30` | How strongly the bow direction follows the direction of travel; `0` is a coin flip |
+| `move_smooth_kappa_min` / `_kappa_max` | `0.85` / `1.25` | Where along the path the bow peaks |
+| `move_smooth_gap_ms` | `250` | Silence that counts as a fresh target |
+| `move_smooth_max_counts` | `127` | Ceiling on one report; the excess is deferred, never dropped |
 
-## Environment reference
+## Configuration reference
 
-`Config::new()` reads these at startup. The twelve marked **required** have no
-default and the process panics without them — including the TensorRT and
-OpenVINO ones, which are read regardless of which provider is selected, so set
-`TRT_*` to any valid value even on an OpenVINO build.
+Everything is read from a TOML file at startup — `config.toml` next to the
+binary, or whatever `--config <path>` names. `config.example.toml` is a working
+starting point; copy it to `config.toml` and edit. The only environment variable
+left is `RUST_LOG`.
+
+A key that is not recognised is an **error**, in the common section and inside a
+`[[profile]]` alike. A misspelled setting that silently does nothing is the
+failure this replaces.
+
+### Required
+
+`source_stream`, `model_path`, `model_input_size`, `model_conf_body`,
+`model_conf_head`, `model_iou`, `makcu_port`, `esp_button_1_profile`,
+`esp_button_2_profile`, and at least one `[[profile]]` with a `name` and a
+`scale_min_zone`.
+
+Unlike the environment version, `trt_*` and `openvino_cache_dir` are **not**
+required: they are only read by the provider that uses them, so an OpenVINO or
+CPU build no longer needs TensorRT settings to start.
 
 ### Core
 
-| Variable | Default | Meaning |
+| Key | Default | Meaning |
 | --- | --- | --- |
-| `SOURCE_STREAM` | **required** | Frame source; see [Frame sources](#frame-sources) |
-| `EVENT_LISTENER_PORT` | `10000` | Port for the event listener |
-| `SCREEN_WIDTH` / `SCREEN_HEIGHT` | `1920` / `1080` | Full frame size; the crosshair is the centre of this |
-| `REGION_LEFT` / `REGION_TOP` | `0` / `0` | Detection region origin |
-| `REGION_WIDTH` / `REGION_HEIGHT` | `0` / `0` | Detection region size. Cropping happens only when this differs from the screen size |
-| `SCALE_MIN_ZONE1` | `0.5` | Dead-zone scale for the normal aim path |
-| `SCALE_MIN_ZONE2` | `0.8` | Dead-zone scale while ESP button 2 aims through `aim_smooth` |
-| `INTRA_THREADS` | `1` | ONNX Runtime intra-op threads |
-| `RUST_LOG` | `info` | e.g. `info,aimbot=debug` for per-stage timings |
+| `source_stream` | **required** | Frame source; see [Frame sources](#frame-sources) |
+| `event_listener_port` | `10000` | Port for the event listener |
+| `screen_width` / `screen_height` | `1920` / `1080` | Full frame size; the crosshair is the centre of this |
+| `region_left` / `region_top` | `0` / `0` | Detection region origin |
+| `region_width` / `region_height` | `0` / `0` | Detection region size. Cropping happens only when this differs from the screen size |
+| `intra_threads` | `1` | ONNX Runtime intra-op threads |
+| `default_aim_mode` | unset | `0` head, `1` neck, `2` chest, `3` abdomen, `4` horizon |
+| `RUST_LOG` (env) | `info` | e.g. `info,aimbot=debug` for per-stage timings |
+
+### Profiles
+
+Each ESP button selects one `[[profile]]` by its position in the file, counting
+from zero. `esp_button_1_profile` also covers the MAKCU side-4 button and the
+no-trigger auto-aim path.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `name` | **required** | Shown in logs; has no effect on aim |
+| `scale_min_zone` | **required** | Dead-zone scale. Below `min_zone * this` no move is queued |
+| `fov` | whole frame | Maximum engagement distance in frame pixels. `0` or absent means no limit |
+| `mover` | `"smooth"` | `"smooth"` for the human-flick model, `"bezier"` to hand the whole delta to the firmware |
+| `aim_mode` | follows the runtime mode | `"head"`, `"neck"`, `"chest"`, `"abdomen"`, `"horizon"`. Set, it pins this profile to that mode; absent, it follows whatever the event listener last selected |
+
+Each profile carries its own `SmoothAim`, so the sub-count remainder, the
+reaction window and the auto-click rate limit are tracked per profile rather
+than shared.
+
+```toml
+esp_button_1_profile = 0
+esp_button_2_profile = 1
+
+[[profile]]
+name = "tracking"
+scale_min_zone = 0.25
+fov = 120.0
+
+[[profile]]
+name = "flick"
+scale_min_zone = 0.85
+aim_mode = "horizon"
+move_smooth_auto_click = true
+move_smooth_auto_click_miss_p = 0.1
+```
 
 ### Model
 
-| Variable | Default | Meaning |
+| Key | Default | Meaning |
 | --- | --- | --- |
-| `MODEL_PATH` | **required** | Model file. A name starting with `v_light` selects the light pipeline |
-| `MODEL_INPUT_SIZE` | **required** | Must match the model input (192 for `v_light_192`) |
-| `MODEL_CONF_BODY` | **required** | Confidence threshold for class 0 |
-| `MODEL_CONF_HEAD` | **required** | Confidence threshold for class 1 |
-| `MODEL_IOU` | **required** | NMS IoU, both pipelines |
-| `MODEL_PROVIDER` | `cpu` | `cpu`, `openvino`, `tensorrt`/`trt`, `rocm`, `migraphx`/`mrx` |
-| `BUILD_HEAD_IOU` | unset | When set, synthesises a head box from each unmatched body box at this IoU |
+| `model_path` | **required** | Model file. A name starting with `v_light` selects the light pipeline |
+| `model_input_size` | **required** | Must match the model input (192 for `v_light_192`) |
+| `model_conf_body` | **required** | Confidence threshold for class 0 |
+| `model_conf_head` | **required** | Confidence threshold for class 1 |
+| `model_iou` | **required** | NMS IoU, both pipelines |
+| `model_provider` | `cpu` | `cpu`, `openvino`, `tensorrt`/`trt`, `rocm`, `migraphx`/`mrx` |
+| `build_head_iou` | unset | When set, synthesises a head box from each unmatched body box at this IoU |
 
 ### Providers
 
-| Variable | Default | Meaning |
+| Key | Default | Meaning |
 | --- | --- | --- |
-| `OPENVINO_CACHE_DIR` | **required** | Compiled-blob cache directory |
-| `OPENVINO_DEVICE_TYPE` | `CPU` | `CPU`, `GPU`, `NPU`, `GPU.0`, ... |
-| `TRT_CACHE_DIR` | **required** | TensorRT engine cache |
-| `TRT_MIN_SHAPES` / `TRT_OPT_SHAPES` / `TRT_MAX_SHAPES` | **required** | e.g. `images:1x3x256x256` |
-| `TRT_FP16` | unset | Build the engine in FP16 |
-| `TRT_MAX_PARTITION_ITERATIONS` | `10` | |
-| `TRT_BUILDER_OPTIMIZATION_LEVEL` | `3` | `0`–`5`; below 3 builds faster but runs slower |
-| `TRT_DLA_ENABLE` / `TRT_DLA_CORE` | `false` / `0` | |
-| `TRT_AUXILIARY_STREAMS` | `-1` | |
-| `GPU_ID` | `0` | Device index |
-| `GPU_MEM_LIMIT` | `1073741824` | Workspace / memory limit in bytes |
+| `openvino_cache_dir` | `""` | Compiled-blob cache directory |
+| `openvino_device_type` | `CPU` | `CPU`, `GPU`, `NPU`, `GPU.0`, ... |
+| `trt_cache_dir` | `""` | TensorRT engine cache |
+| `trt_min_shapes` / `trt_opt_shapes` / `trt_max_shapes` | `""` | e.g. `images:1x3x256x256` |
+| `trt_fp16` | unset | Build the engine in FP16 |
+| `trt_max_partition_iterations` | `10` | |
+| `trt_builder_optimization_level` | `3` | `0`–`5`; below 3 builds faster but runs slower |
+| `trt_dla_enable` / `trt_dla_core` | `false` / `0` | |
+| `trt_auxiliary_streams` | `-1` | |
+| `gpu_id` | `0` | Device index |
+| `gpu_mem_limit` | `1073741824` | Workspace / memory limit in bytes |
 
 ### NDI
 
-| Variable | Default | Meaning |
+| Key | Default | Meaning |
 | --- | --- | --- |
-| `NDI_SOURCE_NAME` | unset | Prefer the source whose name matches |
-| `NDI_TIMEOUT` | `1000` | Receive timeout in ms |
+| `ndi_source_name` | unset | Prefer the source whose name matches |
+| `ndi_timeout_ms` | `1000` | Receive timeout in ms |
 
 ### Output
 
-| Variable | Default | Meaning |
+| Key | Default | Meaning |
 | --- | --- | --- |
-| `MAKCU_PORT` | **required** | Serial port of the MAKCU device |
-| `MAKCU_BAUD` | `115200` | |
-| `MAKCU_LISTEN` | `false` | Watch mouse buttons to toggle trigger / auto-aim |
-| `MOUSE_DPI` | `1000` | |
-| `GAME_SENS` | `1.0` | |
-| `ESP_PORT` | unset | Serial port of the ESP button board |
+| `makcu_port` | **required** | Serial port of the MAKCU device |
+| `makcu_baud` | `115200` | |
+| `makcu_listen` | `false` | Watch mouse buttons to toggle trigger / auto-aim |
+| `mouse_dpi` | `1000` | |
+| `game_sens` | `1.0` | |
+| `esp_port` | unset | Serial port of the ESP button board |
 
 ### Human-flick movement
 
-What each one does, how to compute its effect and presets by FOV are under
+These live **inside a `[[profile]]`**, so each ESP button can be tuned on its
+own. What each one does, how to compute its effect and presets by fov are under
 [Mouse movement](#settings).
 
-| Variable | Default | Meaning |
+| Key | Default | Meaning |
 | --- | --- | --- |
-| `MOVE_SMOOTH` | `false` | Use `move_smooth` instead of `move_bezier` in the ordinary aim modes. ESP button 2 always uses it |
-| `MOVE_SMOOTH_POLL_HZ` | `0` | Report cadence; `0` derives it from `MAKCU_BAUD` |
-| `MOVE_SMOOTH_FITTS_A_MS` / `_B_MS` | `35` / `55` | Fitts intercept and slope, ms and ms per bit |
-| `MOVE_SMOOTH_MIN_MS` / `_MAX_MS` | `45` / `320` | Movement-time clamp |
-| `MOVE_SMOOTH_GAIN` | `0.90` | Fraction of the distance the ballistic phase commits to |
-| `MOVE_SMOOTH_OVERSHOOT_P` | `0.15` | Share of flicks that overshoot instead of falling short |
-| `MOVE_SMOOTH_PEAK_MIN` / `_PEAK_MAX` | `0.30` / `0.45` | Where peak speed sits, as a fraction of the movement |
-| `MOVE_SMOOTH_BOW` | `0.03` | Maximum perpendicular deviation, as a fraction of the amplitude |
-| `MOVE_SMOOTH_NOISE` | `0.022` | Signal-dependent motor noise coefficient |
-| `MOVE_SMOOTH_TREMOR` | `0.35` | Physiological tremor amplitude in counts; `0` disables it |
-| `MOVE_SMOOTH_REACT_MIN_MS` / `_MAX_MS` | `0` / `0` | Reaction latency on a fresh target; off by default |
-| `MOVE_SMOOTH_COUNTS_PER_REPORT` | `2.0` | Mean counts one report carries; caps how many reports a flick plans |
-| `MOVE_SMOOTH_MIN_SPEED_IPS` / `_MAX_SPEED_IPS` | `0.6` / `40` | Hand-speed envelope in inches per second; the floor sets the duration below a few hundred counts |
-| `MOVE_SMOOTH_MOVE_NOW` | `false` | Emit `km.move_now` instead of `km.move`. Probed at connect and ignored on firmware without it |
-| `MOVE_SMOOTH_AUTO_CLICK` | `false` | Click once a flick has settled |
-| `MOVE_SMOOTH_AUTO_CLICK_LOWER_MS` / `_UPPER_MS` | `100` / `130` | Wait between the flick and the click |
-| `MOVE_SMOOTH_AUTO_CLICK_RATE_LIMIT` | `0` | Smallest gap between two clicks, ms; `0` is no limit |
-| `MOVE_SMOOTH_AUTO_CLICK_MISS_P` | `0.0` | Chance the shot is fired without letting the aim settle |
+| `move_smooth_poll_hz` | `0` | Report cadence; `0` derives it from `makcu_baud` |
+| `move_smooth_fitts_a_ms` / `_b_ms` | `35` / `55` | Fitts intercept and slope, ms and ms per bit |
+| `move_smooth_min_ms` / `_max_ms` | `45` / `320` | Movement-time clamp |
+| `move_smooth_gain` | `0.90` | Fraction of the distance the ballistic phase commits to |
+| `move_smooth_overshoot_p` | `0.15` | Share of flicks that overshoot instead of falling short |
+| `move_smooth_peak_min` / `_peak_max` | `0.30` / `0.45` | Where peak speed sits, as a fraction of the movement |
+| `move_smooth_bow` | `0.03` | Maximum perpendicular deviation, as a fraction of the amplitude |
+| `move_smooth_noise` | `0.022` | Signal-dependent motor noise coefficient |
+| `move_smooth_tremor` | `0.35` | Physiological tremor amplitude in counts; `0` disables it |
+| `move_smooth_react_min_ms` / `_max_ms` | `0` / `0` | Reaction latency on a fresh target; off by default |
+| `move_smooth_counts_per_report` | `2.0` | Mean counts one report carries; caps how many reports a flick plans |
+| `move_smooth_min_speed_ips` / `_max_speed_ips` | `0.6` / `40` | Hand-speed envelope in inches per second; the floor sets the duration below a few hundred counts |
+| `move_smooth_move_now` | `false` | Emit `km.move_now` instead of `km.move`. Probed at connect and ignored on firmware without it |
+| `move_smooth_auto_click` | `false` | Click once a flick has settled |
+| `move_smooth_auto_click_lower_ms` / `_upper_ms` | `100` / `130` | Wait between the flick and the click |
+| `move_smooth_auto_click_rate_limit_ms` | `0` | Smallest gap between two clicks, ms; `0` is no limit |
+| `move_smooth_auto_click_miss_p` | `0.0` | Chance the shot is fired without letting the aim settle |
 
-Capture-card variables are in
+The remaining `SmoothConfig` fields are listed under
+[Rarely touched](#rarely-touched).
+
+Capture-card keys are in
 [Capture from a capture card](#capture-from-a-capture-card).
 
 ## Cargo features

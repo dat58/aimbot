@@ -1,0 +1,46 @@
+event_listener_port = 10000
+
+# source_stream = "ndi://172.24.36.133"
+ndi_source_name = "pc1"
+ndi_timeout_ms = 1000
+source_stream = "elgato:///dev/video0"
+capture_width = 1920
+capture_height = 1080
+capture_fps = 240
+capture_fourcc = "MPJG"
+capture_timeout_ms = 2000
+
+screen_width = 2560
+screen_height = 1440
+region_left = 864
+region_top = 444
+region_width = 192
+region_height = 192
+
+model_provider = "openvino"
+model_path = "/app/assets/best.onnx"
+model_input_size = 256
+model_conf_body = 0.5
+model_conf_head = 0.1
+model_iou = 0.6
+intra_threads = 1
+
+openvino_cache_dir = "/app/assets"
+openvino_device_type = "CPU"
+
+makcu_port = "/dev/ttyACM0"
+makcu_baud = 4000000
+mouse_dpi = 1000
+game_sens = 0.38
+
+esp_button_1_profile = 0
+esp_button_2_profile = 1
+
+[[profile]]
+name = "tracking"
+scale_min_zone = 0.85
+
+[[profile]]
+name = "flick"
+scale_min_zone = 0.85
+aim_mode = "horizon"

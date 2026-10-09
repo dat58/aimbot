@@ -688,6 +688,9 @@ fn render_weights(out: &mut Vec<f64>, mt_ms: f64, peak_frac: f64, n: usize) {
 pub enum MoveRequest {
     /// Play the human-flick model, and the auto click behind it if configured.
     Smooth {
+        /// Index into the configured profiles, which picks the `SmoothAim`
+        /// whose tuning and carried state this flick belongs to.
+        profile: usize,
         delta: (f64, f64),
         /// Reach and target width in *screen* pixels; Fitts wants the visual
         /// difficulty of the shot, which counts do not carry.
@@ -714,7 +717,7 @@ pub enum MoveRequest {
 pub fn handle_mouse(
     mouse: Arc<MouseVirtual>,
     queue: Arc<ArrayQueue<MoveRequest>>,
-    mut smooth: SmoothAim,
+    mut smooth: Vec<SmoothAim>,
     keep_going: impl Fn() -> bool,
 ) {
     let mut random = rand::rng();
@@ -723,15 +726,14 @@ pub fn handle_mouse(
             sleep(IDLE_POLL);
             continue;
         };
-        let smooth_move = matches!(request, MoveRequest::Smooth { .. });
-        play_request(&mouse, &mut smooth, &mut random, &keep_going, request);
         // Only the human-flick path clicks; a bezier move is the plain path and
         // was never part of this.
-        if !smooth_move {
+        let Some(profile) = play_request(&mouse, &mut smooth, &mut random, &keep_going, request)
+        else {
             continue;
-        }
+        };
 
-        let until = match plan_click(&smooth, &mut random) {
+        let until = match plan_click(&smooth[profile], &mut random) {
             ClickPlan::None => continue,
             // Hold still: whatever the flick got wrong is what the shot carries.
             ClickPlan::Miss(wait) => {
@@ -750,7 +752,7 @@ pub fn handle_mouse(
             while Instant::now() < deadline {
                 match queue.pop() {
                     Some(request) => {
-                        play_request(&mouse, &mut smooth, &mut random, &keep_going, request)
+                        play_request(&mouse, &mut smooth, &mut random, &keep_going, request);
                     }
                     None => sleep(IDLE_POLL),
                 }
@@ -767,7 +769,7 @@ pub fn handle_mouse(
         // milliseconds, which would otherwise be added to every gap.
         let pressed_at = Instant::now();
         match mouse.click_left(&mut random) {
-            Ok(()) => smooth.last_click = Some(pressed_at),
+            Ok(()) => smooth[profile].last_click = Some(pressed_at),
             Err(e) => tracing::error!("[Mouse] {}", e),
         }
     }
@@ -777,22 +779,33 @@ pub fn handle_mouse(
 /// aiming: the next frame plans afresh from wherever the crosshair actually is.
 fn play_request<F: Fn() -> bool>(
     mouse: &MouseVirtual,
-    smooth: &mut SmoothAim,
+    smooth: &mut [SmoothAim],
     random: &mut rand::rngs::ThreadRng,
     keep_going: &F,
     request: MoveRequest,
-) {
-    let result = match request {
+) -> Option<usize> {
+    let (result, played) = match request {
         MoveRequest::Smooth {
+            profile,
             delta,
             reach_px,
             width_px,
-        } => mouse.move_smooth(smooth, delta, reach_px, width_px, random, keep_going),
-        MoveRequest::Bezier { delta } => mouse.move_bezier(delta.0, delta.1, random),
+        } => {
+            let Some(state) = smooth.get_mut(profile) else {
+                tracing::error!("[Mouse] request names profile {profile}, which is not configured");
+                return None;
+            };
+            (
+                mouse.move_smooth(state, delta, reach_px, width_px, random, keep_going),
+                Some(profile),
+            )
+        }
+        MoveRequest::Bezier { delta } => (mouse.move_bezier(delta.0, delta.1, random), None),
     };
     if let Err(e) = result {
         tracing::error!("[Mouse] {}", e);
     }
+    played
 }
 
 /// What the auto click should do once a flick has been played.

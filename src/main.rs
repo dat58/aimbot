@@ -263,10 +263,12 @@ fn main() -> Result<()> {
                         tracing::debug!("[Model] bboxes: {:?}", bboxes);
 
                         if bboxes.len() > 0 {
+                            let esp_button1_pressed = esp_button1.load(Ordering::Acquire);
                             let esp_button2_pressed = esp_button2.load(Ordering::Acquire);
-                            let (profile_index, profile) =
-                                config.profile_for(esp_button2_pressed);
-                            if profile_index != last_profile {
+                            let (profile_index, profile) = config.profile_for(esp_button2_pressed);
+                            if (esp_button1_pressed || esp_button2_pressed)
+                                && (profile_index != last_profile)
+                            {
                                 last_profile = profile_index;
                                 tracing::info!(
                                     "[Profile] {} -> {:?} (mover {}, fov {}, scale_min_zone {}, aim {})",
@@ -282,9 +284,7 @@ fn main() -> Result<()> {
                                 );
                             }
                             let (destination, min_zone) = match profile.aim_mode {
-                                Some(mode) => {
-                                    aim.aim_as(mode, &bboxes, &crosshair, &mut random)
-                                }
+                                Some(mode) => aim.aim_as(mode, &bboxes, &crosshair, &mut random),
                                 None => aim.aim(&bboxes, &crosshair, &mut random),
                             }
                             .unwrap();
@@ -304,7 +304,7 @@ fn main() -> Result<()> {
                                 );
                                 let use_trigger = trigger.load(Ordering::Acquire);
                                 let fire = (use_trigger
-                                    && (esp_button1.load(Ordering::Acquire)
+                                    && (esp_button1_pressed
                                         || esp_button2_pressed
                                         || mouse.is_side4_pressing()))
                                     || (!use_trigger);

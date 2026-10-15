@@ -29,3 +29,4 @@ assets
 *.xml
 *.iml
 .env
+config.toml

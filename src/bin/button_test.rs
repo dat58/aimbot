@@ -23,7 +23,8 @@ fn main() {
         "{:?}",
         serialport::available_ports().expect("No serial ports found!")
     );
-    let config = Config::new();
+    let config = Config::load(std::path::Path::new("config.toml"))
+        .expect("cannot load config.toml");
     let state1 = Arc::new(AtomicBool::new(false));
     let state2 = Arc::new(AtomicBool::new(false));
     let mut esp_button = EspButton::new(&config.esp_port.unwrap(), state1.clone(), state2.clone())

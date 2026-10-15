@@ -3,6 +3,8 @@
 use aimbot::{
     aim::{AimMode, Mode},
     config::{Config, Mover, mouse_counts},
+    mouse_ab::AbAim,
+    mouse_input::CursorTrack,
     esp_button::EspButton,
     event::start_event_listener,
     model::{Bbox, Model, Point2f},
@@ -226,11 +228,55 @@ fn main() -> Result<()> {
                         SmoothAim::new(profile.smooth, config.makcu_baud, config.mouse_dpi)
                     })
                     .collect();
+                // Only the profiles that ask for it pay the model load and the
+                // 2.7 ms renderer profile; the rest keep their slot empty so
+                // the index still lines up with `config.profiles`.
+                let mut ab: Vec<Option<AbAim>> = config
+                    .profiles
+                    .iter()
+                    .map(|profile| {
+                        if profile.mover != Mover::AbCurves {
+                            return Ok(None);
+                        }
+                        AbAim::new(
+                            profile.abcurves.clone(),
+                            profile.smooth,
+                            config.screen_width,
+                            config.game_sens,
+                            config.mouse_dpi,
+                        )
+                        .map(Some)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                // One feed, shared: the pointer is one pointer however many
+                // profiles want to watch it.
+                if ab.iter().flatten().any(AbAim::wants_cursor) {
+                    let hz = config
+                        .profiles
+                        .iter()
+                        .map(|profile| profile.abcurves.getpos_hz)
+                        .max()
+                        .unwrap_or(100);
+                    let bins = config
+                        .profiles
+                        .iter()
+                        .map(|profile| profile.abcurves.capture_bins)
+                        .max()
+                        .unwrap_or(1024);
+                    for (index, slot) in ab.iter_mut().enumerate() {
+                        let Some(state) = slot else { continue };
+                        if !state.wants_cursor() {
+                            continue;
+                        }
+                        state.track(CursorTrack::start(mouse.clone(), hz, bins));
+                        tracing::info!("[Cursor] profile {index} reads the pointer back");
+                    }
+                }
                 let trigger = trigger.clone();
                 let button1 = esp_button1.clone();
                 let button2 = esp_button2.clone();
                 thread::spawn(move || {
-                    handle_mouse(mouse, queue, smooth, move || {
+                    handle_mouse(mouse, queue, smooth, ab, move || {
                         let use_trigger = trigger.load(Ordering::Acquire);
                         !use_trigger
                             || button1.load(Ordering::Acquire)
@@ -327,6 +373,23 @@ fn main() -> Result<()> {
                                             width_px: 2. * min_zone * px_scale,
                                         },
                                         Mover::Bezier => MoveRequest::Bezier { delta: (dx, dy) },
+                                        Mover::AbCurves => MoveRequest::AbCurves {
+                                            profile: profile_index,
+                                            delta: (dx, dy),
+                                            // The static planner wants the
+                                            // radius it may land inside, in
+                                            // counts; `width_px` is the same
+                                            // thing doubled for Fitts.
+                                            radius: mouse_counts(
+                                                (min_zone, 0.),
+                                                config.frame_to_screen,
+                                                config.game_sens,
+                                                config.mouse_dpi,
+                                            )
+                                            .0,
+                                            reach_px: dist * px_scale,
+                                            width_px: 2. * min_zone * px_scale,
+                                        },
                                     });
                                 }
                             }

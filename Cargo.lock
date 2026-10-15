@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "abcurves"
+version = "0.1.0"
+source = "git+https://github.com/dat58/abcurves-rs#3159820d9ec17cbacdeb285f818bcf54b6df1242"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "actix-codec"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -228,6 +236,7 @@ dependencies = [
 name = "aimbot"
 version = "1.0.0"
 dependencies = [
+ "abcurves",
  "actix-cors",
  "actix-web",
  "anyhow",
@@ -249,6 +258,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "triple_buffer",
  "uuid",
 ]
 
@@ -1736,6 +1746,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2028,6 +2049,15 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "triple_buffer"
+version = "8.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "420466259f9fa5decc654c490b9ab538400e5420df8237f84ecbe20368bcf72b"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]

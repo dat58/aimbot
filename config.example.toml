@@ -56,8 +56,15 @@ mover = "smooth"
 [[profile]]
 name = "flick"
 scale_min_zone = 0.25
-mover = "smooth"
+mover = "abcurves"
 aim_mode = "horizon"
+# Shared with the flick model: abcurves reads these too.
 move_smooth_auto_click = true
 move_smooth_auto_click_miss_p = 0.1
 move_smooth_auto_click_rate_limit_ms = 250
+# hybrid: the flick model carries the reach, the neural one does the stop.
+move_ab_planner = "hybrid"
+move_ab_fallback = "continuous"
+move_ab_max_duration_ms = 250
+# Needed only by the continuous planner, which works in angles.
+move_ab_fov_deg = 103.0

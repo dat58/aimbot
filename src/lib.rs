@@ -4,4 +4,6 @@ pub mod esp_button;
 pub mod event;
 pub mod model;
 pub mod mouse;
+pub mod mouse_ab;
+pub mod mouse_input;
 pub mod stream;

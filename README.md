@@ -334,6 +334,7 @@ A mouse delta is played one of two ways:
 | --- | --- |
 | `move_smooth` | The host plans a human flick and plays it as a stream of small `km.move` reports on a fixed cadence. |
 | `move_bezier` | The original single `km.move(dx,dy,steps,ref_x,ref_y)`, interpolated by the MAKCU firmware. |
+| `abcurves` | A neural model trained on real human mouse data, played one report per millisecond. See [Neural movement](#neural-movement-abcurves). |
 
 ### Which one is used
 
@@ -346,7 +347,8 @@ The profile decides. Which profile is in play depends on the ESP button:
 
 `mover` defaults to `"smooth"`, so a profile that says nothing gets the
 human-flick model. Setting `mover = "bezier"` hands the whole delta to the
-firmware instead, and that path never auto-clicks.
+firmware instead, and that path never auto-clicks. `mover = "abcurves"` plays
+the neural model, which does auto-click.
 
 Setting `aim_mode = "horizon"` reproduces what used to be hard-wired to ESP
 button 2. Horizon sends x straight to the centre of the box, while y is only
@@ -724,6 +726,95 @@ reason. The defaults live in `SmoothConfig::default()` in `src/config.rs`.
 | `move_smooth_gap_ms` | `250` | Silence that counts as a fresh target |
 | `move_smooth_max_counts` | `127` | Ceiling on one report; the excess is deferred, never dropped |
 
+## Neural movement (abcurves)
+
+`mover = "abcurves"` plays [abcurves](https://github.com/dat58/abcurves-rs), a
+model trained on recorded human mouse movement. The model owns the path —
+duration, speed profile, curvature, tremor — so none of the `move_smooth_*`
+shape knobs apply to it. What it *does* read from `SmoothConfig` is everything
+about the target rather than the path: the ballistic gain, the reaction window,
+and the whole auto-click family. Those keep their `move_smooth_` names because
+both movers read the same values.
+
+### The static planner continues a movement, it does not make one
+
+This is the fact the whole design turns on. The static planner plans only the
+segment from the handoff to the target, and the crate's seam rules cap that at
+roughly `radius` to `0.1 x distance + 0.9 x radius`. Measured here, asking it
+for a 290-count reach from a standing start came back as 30-57 counts, and the
+crate's own `static_to_point` example documents a 43-80% shortfall for the same
+reason.
+
+So something has to perform the approach, and `move_ab_planner` picks what:
+
+| `move_ab_planner` | What happens |
+| --- | --- |
+| `hybrid` (default) | The flick model carries the reach and is cut mid-stroke; the neural model takes over for the stop, with the reports the flick actually emitted as its prefix |
+| `static` | The neural model alone, over an approach that is constructed and never sent — only the finish reaches the wire |
+| `continuous` | The continuous planner, which needs no prefix and works from rest |
+| `getpos` | `km.getpos()` is polled to build the prefix out of the hand's own movement, then the static planner finishes it |
+
+Measured for `hybrid`, 40 draws per row:
+
+| Ask (counts) | Approach | Finish | Total | Cover |
+| --- | --- | --- | --- | --- |
+| 300, −120 | 250, −102 | 51, −26 | 301, −128 | 101% |
+| 60, 0 | 38, 1 | 26, −5 | 64, −4 | 107% |
+| 35, 35 | 28, 26 | 15, 5 | 43, 31 | 107% |
+
+### Settings
+
+All of these live inside a `[[profile]]`.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `move_ab_planner` | `hybrid` | See the table above |
+| `move_ab_fallback` | `continuous` | `continuous` or `smooth`; where a reach goes when the neural path turns it away |
+| `move_ab_max_duration_ms` | `250` | Heads longer than this are dropped before the draw |
+| `move_ab_lead` | `1.2` | How far past the target the approach flick is aimed under `hybrid`. The handoff must land while the hand is still moving, and a flick aimed exactly at the target is already slowing by then: over 40 draws of a 323-count reach the handoff was accepted 31 times at `1.0` and 40 at `1.2` |
+| `move_ab_handoff` | `0.5` | Where inside the allowed window to hand over, `0` as early as the model permits and `1` as late |
+| `move_ab_lock_axis` | `false` | Hold the physical mouse axes still while a stroke plays. Never touches the buttons, so a shot still goes through, and the axes are released on every exit including an abandoned stroke. Verified on V4: `km.lock_mx(1)` passes an injected move through unchanged and leaves `km.left()` reading `0` |
+| `move_ab_fov_deg` | — | **Required by `continuous`.** The game's horizontal FOV; the continuous planner works in angles and nothing else in the configuration carries one |
+| `move_ab_model_seed` | `7` | Which trained cell, `7` or `23`. Not a random seed |
+| `move_ab_model_dir` | `assets/abcurves` | The 4.7 MB model directory |
+| `move_ab_profile` | `assets/abcurves_profile.i16` | Renderer texture window, exactly 256 reports of two little-endian `i16` |
+| `move_ab_max_stroke_ms` | `600` | Safety rail on a continuous stroke |
+| `move_ab_getpos_hz` | `1000` | Poll rate under `planner = "getpos"`. One round trip measures 0.22 ms, so the planner's own 1 kHz grid fits with room to spare |
+| `move_ab_capture_bins` | `1024` | 1 ms bins of cursor history kept under `planner = "getpos"` |
+
+### Choosing a head
+
+The planner returns sixteen finishes for one handoff. They are sorted by
+duration, anything past `move_ab_max_duration_ms` is dropped, and one of the
+survivors is drawn at random. The draw is deliberate: the sixteen are the
+model's own distribution of human stops, and always taking the shortest would
+replace that distribution with its own tail, which is itself a signature.
+
+### Reading the hand back
+
+MAKCU V4 has no command that streams mouse motion. `km.axis` and `km.mouse` are
+V3.x only, and `km.stream(mouse)` states outright that motion is not emitted.
+So `planner = "getpos"` polls `km.getpos()` and differences it. Measured on a
+V4 device:
+
+| | |
+| --- | --- |
+| Round trip | 0.22 ms median, 0.30 ms worst of 40 — so ~4500 Hz is reachable and 1 kHz is comfortable |
+| Scale | exactly 1:1. `km.move(100,0)` moves the reported position by 100, so the firmware's virtual-screen units *are* mouse counts |
+| Our own output | **included.** `km.getpos` reports the firmware's estimate of every report the PC accepted, ours among them |
+
+That last row is a feedback loop: left alone, the planner would be handed its
+own output back as if a hand had made it. So every injected count is accounted
+for and taken out of the next samples. It is taken out *as it lands*, not all
+at once when the command is sent — the firmware spreads one `km.move` over
+several reports, and subtracting the whole thing up front invented a spike one
+way and an equal one back, measured as 480 counts of phantom path for a
+120-count injection whose net was zero. Paying the debt down sample by sample
+brings that to zero.
+
+If the firmware will not answer `km.getpos` at all, the profile logs it once
+and falls back for every reach.
+
 ## Configuration reference
 
 Everything is read from a TOML file at startup — `config.toml` next to the
@@ -770,7 +861,7 @@ no-trigger auto-aim path.
 | `name` | **required** | Shown in logs; has no effect on aim |
 | `scale_min_zone` | **required** | Dead-zone scale. Below `min_zone * this` no move is queued |
 | `fov` | whole frame | Maximum engagement distance in frame pixels. `0` or absent means no limit |
-| `mover` | `"smooth"` | `"smooth"` for the human-flick model, `"bezier"` to hand the whole delta to the firmware |
+| `mover` | `"smooth"` | `"smooth"` for the human-flick model, `"bezier"` to hand the whole delta to the firmware, `"abcurves"` for the neural model |
 | `aim_mode` | follows the runtime mode | `"head"`, `"neck"`, `"chest"`, `"abdomen"`, `"horizon"`. Set, it pins this profile to that mode; absent, it follows whatever the event listener last selected |
 
 Each profile carries its own `SmoothAim`, so the sub-count remainder, the
@@ -867,7 +958,9 @@ own. What each one does, how to compute its effect and presets by fov are under
 | `move_smooth_auto_click_miss_p` | `0.0` | Chance the shot is fired without letting the aim settle |
 
 The remaining `SmoothConfig` fields are listed under
-[Rarely touched](#rarely-touched).
+[Rarely touched](#rarely-touched). The `move_ab_*` keys are under
+[Neural movement](#neural-movement-abcurves); a profile with
+`mover = "abcurves"` reads both sets.
 
 Capture-card keys are in
 [Capture from a capture card](#capture-from-a-capture-card).

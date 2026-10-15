@@ -295,6 +295,8 @@ pub enum Mover {
     #[default]
     Smooth,
     Bezier,
+    #[serde(rename = "abcurves")]
+    AbCurves,
 }
 
 impl std::fmt::Display for Mover {
@@ -302,7 +304,201 @@ impl std::fmt::Display for Mover {
         match self {
             Mover::Smooth => write!(f, "smooth"),
             Mover::Bezier => write!(f, "bezier"),
+            Mover::AbCurves => write!(f, "abcurves"),
         }
+    }
+}
+
+/// How a profile drives abcurves.
+///
+/// The static planner *continues* a movement rather than making one: it only
+/// ever plans the handoff-to-target segment, which the seam rules cap at
+/// roughly `0.1 x distance + 0.9 x radius`. Measured here, a 290-count reach
+/// came back as 30-57 counts. So something has to perform the approach, and
+/// which something is what this picks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Planner {
+    /// The flick model carries the reach, the static planner does the finish,
+    /// and the reports the flick actually emitted are its prefix. The human
+    /// part lands where it matters most, on the stop.
+    #[default]
+    Hybrid,
+    /// The static planner alone, over an approach that is constructed and
+    /// never sent. Only the finish reaches the wire.
+    Static,
+    /// The continuous planner, which needs no prefix and works from rest.
+    Continuous,
+    /// Read the cursor back with `km.getpos()` to build a real prefix out of
+    /// the hand's own movement, then hand off to the static planner.
+    GetPos,
+}
+
+impl std::fmt::Display for Planner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Planner::Hybrid => write!(f, "hybrid"),
+            Planner::Static => write!(f, "static"),
+            Planner::Continuous => write!(f, "continuous"),
+            Planner::GetPos => write!(f, "getpos"),
+        }
+    }
+}
+
+/// Where a reach goes when the static planner cannot take it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Fallback {
+    #[default]
+    Continuous,
+    Smooth,
+}
+
+impl std::fmt::Display for Fallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Fallback::Continuous => write!(f, "continuous"),
+            Fallback::Smooth => write!(f, "smooth"),
+        }
+    }
+}
+
+/// Tuning for the neural mover. Everything the path itself needs comes from
+/// the model; what is here is either an abcurves input or a routing decision.
+/// The target-level knobs it shares with the flick model — gain, overshoot,
+/// the reaction window and the whole auto-click family — are read from
+/// [`SmoothConfig`] rather than duplicated.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AbConfig {
+    #[serde(rename = "move_ab_planner")]
+    pub planner: Planner,
+    /// How often the cursor is read back when `planner = "getpos"`.
+    ///
+    /// Measured on the device, one `km.getpos` round trip is 0.22 ms, so the
+    /// planner's own 1 kHz grid is comfortably inside what the link sustains
+    /// and needs no interpolation between samples.
+    #[serde(rename = "move_ab_getpos_hz")]
+    pub getpos_hz: u32,
+    #[serde(rename = "move_ab_fallback")]
+    pub fallback: Fallback,
+    /// Heads longer than this are dropped before the draw.
+    #[serde(rename = "move_ab_max_duration_ms")]
+    pub max_duration_ms: usize,
+    /// Hold the physical mouse axes still while a stroke plays. Never touches
+    /// the buttons, so a shot still goes through.
+    #[serde(rename = "move_ab_lock_axis")]
+    pub lock_axis: bool,
+    /// Where inside the allowed handoff window to hand over, `0` as early as
+    /// the model permits and `1` as late.
+    ///
+    /// The window itself is not ours: the seam rules put it at roughly
+    /// `radius` to `0.1 x distance + 0.9 x radius`, and outside it the
+    /// continuation is refused. The midpoint leaves room for one more report
+    /// to land without falling through the floor.
+    #[serde(rename = "move_ab_handoff")]
+    pub handoff: f64,
+    #[serde(rename = "move_ab_approach_bins")]
+    pub approach_bins: usize,
+    /// How far past the target the approach flick is aimed, under `hybrid`.
+    ///
+    /// The handoff has to happen while the hand is still moving, and a flick
+    /// aimed exactly at the target is already decelerating by then. Measured
+    /// over 40 draws of a 323-count reach: at 1.0 the handoff was accepted
+    /// 31 times, at 1.2 it was accepted 40.
+    #[serde(rename = "move_ab_lead")]
+    pub lead: f64,
+    /// The game's horizontal field of view, degrees. Required by the
+    /// continuous planner, which works in angles; the static one does not.
+    #[serde(rename = "move_ab_fov_deg")]
+    pub fov_deg: f64,
+    #[serde(rename = "move_ab_model_dir")]
+    pub model_dir: PathBuf,
+    /// Which trained cell, `7` or `23`. Not a random seed.
+    #[serde(rename = "move_ab_model_seed")]
+    pub model_seed: u32,
+    /// Exactly 256 reports of two little-endian `i16`, the renderer's texture
+    /// window.
+    #[serde(rename = "move_ab_profile")]
+    pub profile: PathBuf,
+    #[serde(rename = "move_ab_max_stroke_ms")]
+    pub max_stroke_ms: u64,
+    /// How many 1 ms bins of cursor history to keep under `planner = "getpos"`.
+    #[serde(rename = "move_ab_capture_bins")]
+    pub capture_bins: usize,
+}
+
+impl Default for AbConfig {
+    fn default() -> Self {
+        Self {
+            planner: Planner::Hybrid,
+            getpos_hz: 1000,
+            fallback: Fallback::Continuous,
+            max_duration_ms: 250,
+            lock_axis: false,
+            handoff: 0.5,
+            approach_bins: 100,
+            lead: 1.2,
+            fov_deg: 0.,
+            model_dir: PathBuf::from("assets/abcurves"),
+            model_seed: 7,
+            profile: PathBuf::from("assets/abcurves_profile.i16"),
+            max_stroke_ms: 600,
+            capture_bins: 1024,
+        }
+    }
+}
+
+impl AbConfig {
+    fn validate(&self, profile: &str) -> Result<()> {
+        if ![7, 23].contains(&self.model_seed) {
+            bail!(
+                "profile {profile:?}: move_ab_model_seed = {} but only 7 and 23 are trained cells",
+                self.model_seed
+            );
+        }
+        if self.planner == Planner::Continuous
+            && !(self.fov_deg.is_finite() && self.fov_deg > 0. && self.fov_deg < 180.)
+        {
+            bail!(
+                "profile {profile:?}: move_ab_planner = \"continuous\" needs move_ab_fov_deg, \
+                 the game's horizontal field of view in degrees"
+            );
+        }
+        if !(self.handoff.is_finite() && (0. ..=1.).contains(&self.handoff)) {
+            bail!(
+                "profile {profile:?}: move_ab_handoff = {} must be between 0 and 1",
+                self.handoff
+            );
+        }
+        if self.approach_bins < 2 {
+            bail!(
+                "profile {profile:?}: move_ab_approach_bins = {} is too few to carry a velocity",
+                self.approach_bins
+            );
+        }
+        if !(self.lead.is_finite() && self.lead >= 1. && self.lead <= 4.) {
+            bail!(
+                "profile {profile:?}: move_ab_lead = {} must be between 1 and 4",
+                self.lead
+            );
+        }
+        if self.max_duration_ms == 0 {
+            bail!("profile {profile:?}: move_ab_max_duration_ms must be greater than zero");
+        }
+        if self.planner == Planner::GetPos && self.capture_bins < 256 {
+            bail!(
+                "profile {profile:?}: move_ab_capture_bins = {} is under the 256 the planner reads",
+                self.capture_bins
+            );
+        }
+        if self.planner == Planner::GetPos && !(1..=1000).contains(&self.getpos_hz) {
+            bail!(
+                "profile {profile:?}: move_ab_getpos_hz = {} must be between 1 and 1000",
+                self.getpos_hz
+            );
+        }
+        Ok(())
     }
 }
 
@@ -326,6 +522,9 @@ pub struct Profile {
     /// Tuning for the human-flick model; see [`SmoothConfig`].
     #[serde(skip)]
     pub smooth: SmoothConfig,
+    /// Tuning for the neural mover; see [`AbConfig`].
+    #[serde(skip)]
+    pub abcurves: AbConfig,
 }
 
 fn de_millis<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Duration, D::Error> {
@@ -600,11 +799,28 @@ impl Config {
             }
         }
         for profile in &mut self.profiles {
-            let keys = std::mem::take(&mut profile.smooth_keys);
-            profile.smooth = SmoothConfig::deserialize(toml::Value::Table(keys))
-                .with_context(|| format!("profile {:?}", profile.name))?;
+            // Split by prefix before deserializing: one `deny_unknown_fields`
+            // struct over the whole table would reject the other's keys, and
+            // the table can only be taken once.
+            let mut ab_keys = toml::Table::new();
+            let mut smooth_keys = toml::Table::new();
+            for (key, value) in std::mem::take(&mut profile.smooth_keys) {
+                if key.starts_with("move_ab_") {
+                    ab_keys.insert(key, value);
+                } else {
+                    smooth_keys.insert(key, value);
+                }
+            }
+            let named = || format!("profile {:?}", profile.name);
+            profile.smooth =
+                SmoothConfig::deserialize(toml::Value::Table(smooth_keys)).with_context(named)?;
+            profile.abcurves =
+                AbConfig::deserialize(toml::Value::Table(ab_keys)).with_context(named)?;
             if profile.fov <= 0. {
                 profile.fov = frame_width as f32;
+            }
+            if profile.mover == Mover::AbCurves {
+                profile.abcurves.validate(&profile.name)?;
             }
         }
         Ok(())
@@ -765,6 +981,119 @@ aim_mode = "horizon"
         assert!(
             Config::parse(&at_root).is_err(),
             "a typo in the common section was accepted"
+        );
+    }
+
+    const AB_PROFILE: &str = r#"
+[[profile]]
+name = "neural"
+scale_min_zone = 0.25
+mover = "abcurves"
+move_smooth_gain = 0.885
+move_smooth_auto_click = true
+move_ab_planner = "static"
+move_ab_max_duration_ms = 180
+move_ab_lock_axis = true
+move_ab_model_seed = 23
+
+[[profile]]
+name = "flick"
+scale_min_zone = 0.8
+"#;
+
+    /// The two prefixes land in one `[[profile]]` and are split apart by
+    /// `resolve`, because one `deny_unknown_fields` struct over the whole table
+    /// would reject the other's keys.
+    #[test]
+    fn a_profile_carries_both_mover_configs_at_once() {
+        let config = Config::parse(&with(AB_PROFILE)).unwrap();
+        let neural = &config.profiles[0];
+        assert_eq!(neural.mover, Mover::AbCurves);
+        assert_eq!(neural.smooth.gain, 0.885);
+        assert!(neural.smooth.auto_click);
+        assert_eq!(neural.abcurves.planner, Planner::Static);
+        assert_eq!(neural.abcurves.fallback, Fallback::Continuous);
+        assert_eq!(neural.abcurves.max_duration_ms, 180);
+        assert!(neural.abcurves.lock_axis);
+        assert_eq!(neural.abcurves.model_seed, 23);
+        // Untouched keys keep their defaults on both sides.
+        assert_eq!(neural.abcurves.handoff, AbConfig::default().handoff);
+        assert_eq!(neural.smooth.tremor, SmoothConfig::default().tremor);
+        // A profile that names no neural keys still gets a usable AbConfig.
+        assert_eq!(config.profiles[1].abcurves, AbConfig::default());
+    }
+
+    /// The split must not cost the typo detection on either side.
+    #[test]
+    fn a_mistyped_key_is_refused_under_either_prefix() {
+        for bad in ["move_ab_fov_dge = 103.0", "move_smoth_gain = 0.5"] {
+            let src = with(&AB_PROFILE.replace(
+                "move_ab_model_seed = 23",
+                &format!("move_ab_model_seed = 23
+{bad}"),
+            ));
+            assert!(Config::parse(&src).is_err(), "{bad} was accepted");
+        }
+    }
+
+    #[test]
+    fn the_continuous_planner_is_refused_without_a_field_of_view() {
+        let src = with(&AB_PROFILE.replace(
+            "move_ab_planner = \"static\"",
+            "move_ab_planner = \"continuous\"",
+        ));
+        let err = Config::parse(&src).unwrap_err().to_string();
+        assert!(err.contains("move_ab_fov_deg"), "{err}");
+
+        // With one it parses.
+        let ok = with(&AB_PROFILE.replace(
+            "move_ab_planner = \"static\"",
+            "move_ab_planner = \"continuous\"\nmove_ab_fov_deg = 103.0",
+        ));
+        assert_eq!(
+            Config::parse(&ok).unwrap().profiles[0].abcurves.planner,
+            Planner::Continuous
+        );
+    }
+
+    #[test]
+    fn an_untrained_model_seed_is_refused() {
+        for (key, value) in [
+            ("move_ab_model_seed", "9"),
+            ("move_ab_handoff", "1.5"),
+            ("move_ab_lead", "0.5"),
+            ("move_ab_approach_bins", "1"),
+            ("move_ab_max_duration_ms", "0"),
+        ] {
+            let src = with(&AB_PROFILE.replace(
+                "move_ab_model_seed = 23",
+                &format!("{key} = {value}"),
+            ));
+            let err = Config::parse(&src).unwrap_err().to_string();
+            assert!(err.contains(key), "{key}: {err}");
+        }
+    }
+
+    /// A profile that does not drive the neural mover is not held to its rules.
+    #[test]
+    fn neural_validation_only_applies_to_neural_profiles() {
+        let src = with(&AB_PROFILE.replace("mover = \"abcurves\"", "mover = \"smooth\""));
+        let src = src.replace("move_ab_model_seed = 23", "move_ab_model_seed = 9");
+        assert!(Config::parse(&src).is_ok());
+    }
+
+    /// The static planner wants the radius the aim may land inside; Fitts wants
+    /// the full width. Passing one where the other belongs is a silent factor
+    /// of two.
+    #[test]
+    fn the_neural_radius_is_a_radius_not_a_width() {
+        let (min_zone, scale, sens, dpi) = (18.0f32, (1.0f64, 1.0f64), 0.38, 1000.);
+        let radius = mouse_counts((min_zone, 0.), scale, sens, dpi).0;
+        let fitts_width = 2. * min_zone;
+        assert!(radius > 0.);
+        assert!(
+            (mouse_counts((fitts_width, 0.), scale, sens, dpi).0 - 2. * radius).abs() < 1e-9,
+            "the Fitts width has to be exactly twice the neural radius"
         );
     }
 

@@ -1,4 +1,5 @@
 use crate::config::{SmoothConfig, poll_hz_for_baud};
+use crate::mouse_ab::{AbAim, Plan, bins_from_steps, cut_at};
 use anyhow::{Result, bail};
 use crossbeam::queue::ArrayQueue;
 use rand::prelude::*;
@@ -8,7 +9,7 @@ use std::{
     f64::consts::{PI, TAU},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
     },
     thread::sleep,
     time::{Duration, Instant},
@@ -39,6 +40,13 @@ pub struct MouseVirtual {
     /// error: asking for `move_now` on firmware without it would swallow every
     /// report and stop the mouse dead with nothing in the log to say why.
     move_now: AtomicBool,
+    /// Counts this process has injected and nobody has accounted for yet.
+    ///
+    /// `km.getpos` reports the firmware's estimate of every report the PC
+    /// accepted, which includes ours. A cursor feed that did not take these
+    /// out would hand the planner its own output back as if a hand had made
+    /// it.
+    injected: [AtomicI64; 2],
 }
 
 impl MouseVirtual {
@@ -105,6 +113,7 @@ impl MouseVirtual {
             serial: Mutex::new(serial),
             pressed: Default::default(),
             move_now: AtomicBool::new(move_now),
+            injected: Default::default(),
         })
     }
 
@@ -182,10 +191,12 @@ impl MouseVirtual {
     pub fn move_shift(&self, dx: f64, dy: f64) -> Result<()> {
         let dx = dx as i32;
         let dy = dy as i32;
+        self.account(dx as i64, dy as i64);
         self.cmd(format!("km.move({dx},{dy})").as_str())
     }
 
     pub fn move_bezier(&self, dx: f64, dy: f64, random: &mut ThreadRng) -> Result<()> {
+        self.account(dx as i64, dy as i64);
         let (steps, ref_x, ref_y) = self.find_bezier(dx, dy, random);
         self.cmd(format!("km.move({dx},{dy},{steps},{ref_x},{ref_y})").as_str())
     }
@@ -237,15 +248,72 @@ impl MouseVirtual {
     /// `keep_going` is checked once per report, because the alternative is not
     /// re-reading the trigger for the length of the movement. A hand abandons a
     /// flick when the reason for it goes away, so this does too.
-    pub fn play_flick(&self, flick: &Flick, keep_going: impl Fn() -> bool) -> Result<()> {
-        // `km.move` is interpolated by V4.028+ firmware over 4-42 ms. Every
-        // report here is already placed on its own deadline, so that second
-        // layer would smear the profile and queue commands behind each other.
-        let verb = if flick.move_now && self.move_now.load(Ordering::Acquire) {
+    /// Ask the firmware where it thinks the pointer is.
+    ///
+    /// V4.026+ only, and what comes back is the firmware's own dead-reckoned
+    /// estimate on its virtual screen, clamped to the screen size — not the
+    /// host cursor. V4 answers a query as `<result>\r\n>>> ` and an unknown
+    /// command as `ERR`, so an older build fails here rather than hanging.
+    pub fn getpos(&self) -> Result<(i32, i32)> {
+        let mut serial = self.serial.lock().expect("Failed to lock serial port");
+        serial.clear(serialport::ClearBuffer::Input)?;
+        serial.write_all(format!("km.getpos(){CRLF}").as_bytes())?;
+        let deadline = Instant::now() + Duration::from_millis(60);
+        let mut seen = String::new();
+        let mut buf = [0u8; 128];
+        while Instant::now() < deadline {
+            match serial.read(&mut buf) {
+                Ok(0) => {}
+                Ok(n) => {
+                    seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    if let Some(parsed) = parse_getpos(&seen) {
+                        return Ok(parsed);
+                    }
+                    if seen.contains("ERR") {
+                        bail!("[Mouse] this firmware has no km.getpos");
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(e) => bail!(e),
+            }
+        }
+        bail!("[Mouse] km.getpos did not answer: {seen:?}")
+    }
+
+    /// The one place a movement command is written, so every mover picks the
+    /// verb the same way.
+    ///
+    /// `km.move` is interpolated by V4 firmware; `km.move_now` puts the counts
+    /// in the next report untouched, which is what a driver that times its own
+    /// reports wants. Probed at connect, because the command does not exist on
+    /// older firmware.
+    /// Read and clear the counts injected since the last call.
+    pub fn take_injected(&self) -> (i64, i64) {
+        (
+            self.injected[0].swap(0, Ordering::AcqRel),
+            self.injected[1].swap(0, Ordering::AcqRel),
+        )
+    }
+
+    fn account(&self, dx: i64, dy: i64) {
+        self.injected[0].fetch_add(dx, Ordering::AcqRel);
+        self.injected[1].fetch_add(dy, Ordering::AcqRel);
+    }
+
+    pub fn emit_move(&self, dx: i64, dy: i64, prefer_now: bool) -> Result<()> {
+        self.account(dx, dy);
+        let verb = if prefer_now && self.move_now.load(Ordering::Acquire) {
             "km.move_now"
         } else {
             "km.move"
         };
+        self.cmd(format!("{verb}({dx},{dy})").as_str())
+    }
+
+    pub fn play_flick(&self, flick: &Flick, keep_going: impl Fn() -> bool) -> Result<()> {
+        // `km.move` is interpolated by V4.028+ firmware over 4-42 ms. Every
+        // report here is already placed on its own deadline, so that second
+        // layer would smear the profile and queue commands behind each other.
         let start = Instant::now();
         let last = flick.steps.len().saturating_sub(1);
         let (mut dx, mut dy) = (0i64, 0i64);
@@ -268,7 +336,7 @@ impl MouseVirtual {
             // elsewhere. The deadline was still honoured, so the slow head and
             // the long tail of the profile keep their shape.
             if (dx, dy) != (0, 0) {
-                self.cmd(format!("{verb}({dx},{dy})").as_str())?;
+                self.emit_move(dx, dy, flick.move_now)?;
                 dx = 0;
                 dy = 0;
             }
@@ -606,6 +674,14 @@ impl SmoothAim {
         }
     }
 
+    /// Drop the sub-count remainder.
+    ///
+    /// Needed when a flick is played only in part: the carry it wrote
+    /// describes counts that never reached the wire.
+    pub fn clear_carry(&mut self) {
+        self.carry = (0., 0.);
+    }
+
     pub fn poll_hz(&self) -> u32 {
         self.poll_hz
     }
@@ -699,6 +775,25 @@ pub enum MoveRequest {
     },
     /// Hand the whole delta to the firmware in one command.
     Bezier { delta: (f64, f64) },
+    /// Play the neural model. Carries `reach_px`/`width_px` as well so a reach
+    /// the neural path turns away can be handed to the flick model unchanged.
+    AbCurves {
+        profile: usize,
+        delta: (f64, f64),
+        /// Target radius in mouse counts, which is what the static planner
+        /// reads; `width_px` is the same thing in screen pixels for Fitts.
+        radius: f64,
+        reach_px: f32,
+        width_px: f32,
+    },
+}
+
+/// Which mover played a request, so the click is planned and stamped against
+/// the state that owns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Played {
+    Smooth(usize),
+    AbCurves(usize),
 }
 
 /// Drain `queue` and drive the mouse, forever.
@@ -718,6 +813,7 @@ pub fn handle_mouse(
     mouse: Arc<MouseVirtual>,
     queue: Arc<ArrayQueue<MoveRequest>>,
     mut smooth: Vec<SmoothAim>,
+    mut ab: Vec<Option<AbAim>>,
     keep_going: impl Fn() -> bool,
 ) {
     let mut random = rand::rng();
@@ -728,12 +824,25 @@ pub fn handle_mouse(
         };
         // Only the human-flick path clicks; a bezier move is the plain path and
         // was never part of this.
-        let Some(profile) = play_request(&mouse, &mut smooth, &mut random, &keep_going, request)
-        else {
+        let Some(played) = play_request(
+            &mouse,
+            &mut smooth,
+            &mut ab,
+            &mut random,
+            &keep_going,
+            request,
+        ) else {
             continue;
         };
 
-        let until = match plan_click(&smooth[profile], &mut random) {
+        let plan = match played {
+            Played::Smooth(index) => plan_click(&smooth[index], &mut random),
+            Played::AbCurves(index) => match ab[index].as_ref() {
+                Some(state) => plan_click(state, &mut random),
+                None => continue,
+            },
+        };
+        let until = match plan {
             ClickPlan::None => continue,
             // Hold still: whatever the flick got wrong is what the shot carries.
             ClickPlan::Miss(wait) => {
@@ -752,7 +861,14 @@ pub fn handle_mouse(
             while Instant::now() < deadline {
                 match queue.pop() {
                     Some(request) => {
-                        play_request(&mouse, &mut smooth, &mut random, &keep_going, request);
+                        play_request(
+                            &mouse,
+                            &mut smooth,
+                            &mut ab,
+                            &mut random,
+                            &keep_going,
+                            request,
+                        );
                     }
                     None => sleep(IDLE_POLL),
                 }
@@ -769,7 +885,14 @@ pub fn handle_mouse(
         // milliseconds, which would otherwise be added to every gap.
         let pressed_at = Instant::now();
         match mouse.click_left(&mut random) {
-            Ok(()) => smooth[profile].last_click = Some(pressed_at),
+            Ok(()) => match played {
+                Played::Smooth(index) => smooth[index].set_last_click(pressed_at),
+                Played::AbCurves(index) => {
+                    if let Some(state) = ab[index].as_mut() {
+                        state.set_last_click(pressed_at);
+                    }
+                }
+            },
             Err(e) => tracing::error!("[Mouse] {}", e),
         }
     }
@@ -780,27 +903,131 @@ pub fn handle_mouse(
 fn play_request<F: Fn() -> bool>(
     mouse: &MouseVirtual,
     smooth: &mut [SmoothAim],
+    ab: &mut [Option<AbAim>],
     random: &mut rand::rngs::ThreadRng,
     keep_going: &F,
     request: MoveRequest,
-) -> Option<usize> {
+) -> Option<Played> {
+    let flick = |smooth: &mut [SmoothAim],
+                 random: &mut rand::rngs::ThreadRng,
+                 profile: usize,
+                 delta: (f64, f64),
+                 reach_px: f32,
+                 width_px: f32| {
+        let Some(state) = smooth.get_mut(profile) else {
+            tracing::error!("[Mouse] request names profile {profile}, which is not configured");
+            return (Ok(()), None);
+        };
+        (
+            mouse.move_smooth(state, delta, reach_px, width_px, random, keep_going),
+            Some(Played::Smooth(profile)),
+        )
+    };
+
     let (result, played) = match request {
         MoveRequest::Smooth {
             profile,
             delta,
             reach_px,
             width_px,
+        } => flick(smooth, random, profile, delta, reach_px, width_px),
+        MoveRequest::Bezier { delta } => (mouse.move_bezier(delta.0, delta.1, random), None),
+        MoveRequest::AbCurves {
+            profile,
+            delta,
+            radius,
+            reach_px,
+            width_px,
         } => {
-            let Some(state) = smooth.get_mut(profile) else {
-                tracing::error!("[Mouse] request names profile {profile}, which is not configured");
+            let Some(state) = ab.get_mut(profile).and_then(Option::as_mut) else {
+                tracing::error!("[Mouse] profile {profile} does not drive the neural mover");
                 return None;
             };
-            (
-                mouse.move_smooth(state, delta, reach_px, width_px, random, keep_going),
-                Some(profile),
-            )
+            match state.plan(delta, radius, random) {
+                Plan::Play(stroke) => {
+                    tracing::debug!(
+                        "[AbCurves] {:?}: {:.2} counts over {} ms, radius {:.1}",
+                        stroke.source,
+                        delta.0.hypot(delta.1),
+                        stroke.reports.len(),
+                        radius,
+                    );
+                    (
+                        state.play(mouse, &stroke, keep_going),
+                        Some(Played::AbCurves(profile)),
+                    )
+                }
+                // The flick model carries the reach and the neural one takes
+                // over for the stop. What the flick put on the wire is the
+                // prefix the static planner wanted all along: real movement,
+                // not a construction.
+                Plan::Approach {
+                    aimed,
+                    target,
+                    radius,
+                    window,
+                    bc,
+                } => {
+                    let Some(sm) = smooth.get_mut(profile) else {
+                        tracing::error!("[Mouse] profile {profile} has no flick state");
+                        return None;
+                    };
+                    let mut stroke = plan_flick(sm, aimed, reach_px, width_px, random)?;
+                    // Cut while the hand is still moving, and forget the
+                    // remainder the flick had planned past that point.
+                    let distance = target[0].hypot(target[1]);
+                    // No legal cut means no handoff. The flick was aimed past
+                    // the target to stay fast through the seam, so trim it
+                    // back to its closest approach and let it stand alone.
+                    let (keep, handed_over) =
+                        match cut_at(&stroke.steps, distance, window, bc) {
+                            Some(keep) => (keep, true),
+                            None => {
+                                tracing::debug!("[AbCurves] no legal cut in this flick");
+                                let keep = cut_at(&stroke.steps, distance, (0., f64::MAX), 0.)
+                                    .unwrap_or(stroke.steps.len());
+                                (keep, false)
+                            }
+                        };
+                    stroke.steps.truncate(keep);
+                    stroke.total = stroke
+                        .steps
+                        .iter()
+                        .fold((0, 0), |sum, step| (sum.0 + step.dx, sum.1 + step.dy));
+                    stroke.duration = stroke.steps.last().map(|step| step.at).unwrap_or_default();
+                    sm.clear_carry();
+                    if let Err(e) = mouse.play_flick(&stroke, keep_going) {
+                        tracing::error!("[Mouse] {}", e);
+                        return Some(Played::Smooth(profile));
+                    }
+                    if !handed_over {
+                        return Some(Played::Smooth(profile));
+                    }
+                    let prefix = bins_from_steps(&stroke.steps);
+                    match state.finish(&prefix, target, radius, random) {
+                        Some(finish) => {
+                            tracing::debug!(
+                                "[AbCurves] {:?}: {} ms finish after a {} ms approach",
+                                finish.source,
+                                finish.reports.len(),
+                                stroke.steps.len(),
+                            );
+                            (
+                                state.play(mouse, &finish, keep_going),
+                                Some(Played::AbCurves(profile)),
+                            )
+                        }
+                        // The approach already covered it; the flick stands on
+                        // its own and still earns its click.
+                        None => (Ok(()), Some(Played::Smooth(profile))),
+                    }
+                }
+                // The neural path turned this reach away; the flick model has
+                // no such regime and takes anything.
+                Plan::Smooth => flick(smooth, random, profile, delta, reach_px, width_px),
+                Plan::Nothing => (Ok(()), None),
+            }
         }
-        MoveRequest::Bezier { delta } => (mouse.move_bezier(delta.0, delta.1, random), None),
     };
     if let Err(e) = result {
         tracing::error!("[Mouse] {}", e);
@@ -831,23 +1058,61 @@ pub enum ClickPlan {
 /// corrections that are still arriving, and only the worker holds the queue
 /// they arrive on. Keeping it out of `move_smooth` also stops those correction
 /// flicks from each planning a click of their own.
-pub fn plan_click(state: &SmoothAim, random: &mut impl Rng) -> ClickPlan {
-    let cfg = state.cfg;
+/// The five knobs and one timestamp the auto click needs. Nothing about how
+/// the mouse got there, which is why every mover can feed the same pipeline.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClickCfg {
+    pub auto_click: bool,
+    pub lower_ms: u64,
+    pub upper_ms: u64,
+    pub miss_p: f64,
+    pub rate_limit_ms: u64,
+}
+
+impl From<&SmoothConfig> for ClickCfg {
+    fn from(cfg: &SmoothConfig) -> Self {
+        Self {
+            auto_click: cfg.auto_click,
+            lower_ms: cfg.auto_click_lower_ms,
+            upper_ms: cfg.auto_click_upper_ms,
+            miss_p: cfg.auto_click_miss_p,
+            rate_limit_ms: cfg.auto_click_rate_limit_ms,
+        }
+    }
+}
+
+/// Implemented by every mover, so [`plan_click`] and the rate limit are
+/// written once.
+pub trait AutoClick {
+    fn click_cfg(&self) -> ClickCfg;
+    fn last_click(&self) -> Option<Instant>;
+    fn set_last_click(&mut self, at: Instant);
+}
+
+impl AutoClick for SmoothAim {
+    fn click_cfg(&self) -> ClickCfg {
+        ClickCfg::from(&self.cfg)
+    }
+    fn last_click(&self) -> Option<Instant> {
+        self.last_click
+    }
+    fn set_last_click(&mut self, at: Instant) {
+        self.last_click = Some(at);
+    }
+}
+
+pub fn plan_click(state: &impl AutoClick, random: &mut impl Rng) -> ClickPlan {
+    let cfg = state.click_cfg();
     if !cfg.auto_click {
         return ClickPlan::None;
     }
-    let wait = auto_click_delay(cfg.auto_click_lower_ms, cfg.auto_click_upper_ms, random);
+    let wait = auto_click_delay(cfg.lower_ms, cfg.upper_ms, random);
     // Asked before the wait, so a click the limit would refuse costs no time at
     // all and the worker goes straight back to tracking.
-    if !click_allowed(
-        state.last_click,
-        Instant::now(),
-        wait,
-        cfg.auto_click_rate_limit_ms,
-    ) {
+    if !click_allowed(state.last_click(), Instant::now(), wait, cfg.rate_limit_ms) {
         return ClickPlan::None;
     }
-    if random.random::<f64>() < cfg.auto_click_miss_p.clamp(0., 1.) {
+    if random.random::<f64>() < cfg.miss_p.clamp(0., 1.) {
         ClickPlan::Miss(wait)
     } else {
         ClickPlan::Settle(wait)
@@ -884,7 +1149,52 @@ pub fn auto_click_delay(lower_ms: u64, upper_ms: u64, random: &mut impl Rng) -> 
 /// One standard normal from two uniforms (Box-Muller). `rand` carries no
 /// normal distribution of its own and `rand_distr` is not worth a dependency
 /// for six lines.
-fn gauss(random: &mut impl Rng) -> f64 {
+/// Hold a fresh acquisition back for a human reaction time, and say whether
+/// the target is new.
+///
+/// Nothing in the pipeline carries a target id, so a fresh acquisition is
+/// inferred from silence: if nothing was aimed at for `gap_ms`, whatever a
+/// mover was carrying describes a target that no longer exists. `None` means
+/// the window has not elapsed and nothing should move yet.
+pub(crate) fn gate_reaction(
+    last_flick: Option<Instant>,
+    ready_at: &mut Option<Instant>,
+    gap_ms: u64,
+    react: (u64, u64),
+    now: Instant,
+    random: &mut impl Rng,
+) -> Option<bool> {
+    let gap = Duration::from_millis(gap_ms);
+    let stale = last_flick.is_none_or(|end| now.saturating_duration_since(end) > gap);
+    if stale && ready_at.is_none() {
+        let (lo, hi) = (react.0.min(react.1), react.0.max(react.1));
+        if hi > 0 {
+            let wait = lo + ((hi - lo) as f64 * random.random::<f64>()).round() as u64;
+            *ready_at = Some(now + Duration::from_millis(wait));
+        }
+    }
+    if let Some(ready) = *ready_at {
+        if now < ready {
+            return None;
+        }
+        *ready_at = None;
+    }
+    Some(stale)
+}
+
+/// Pull `(x, y)` out of a `km.getpos(123,456)` reply.
+///
+/// Pure, because the reply format is the part of the V4 protocol this has to
+/// get exactly right and the device is not always to hand.
+pub(crate) fn parse_getpos(reply: &str) -> Option<(i32, i32)> {
+    let open = reply.find("km.getpos(")? + "km.getpos(".len();
+    let rest = &reply[open..];
+    let close = rest.find(')')?;
+    let (x, y) = rest[..close].split_once(',')?;
+    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+}
+
+pub(crate) fn gauss(random: &mut impl Rng) -> f64 {
     // `random::<f64>()` is [0, 1), and `ln(0)` would poison the whole plan
     // with NaN.
     let u1 = random.random::<f64>().max(f64::MIN_POSITIVE);
@@ -894,7 +1204,7 @@ fn gauss(random: &mut impl Rng) -> f64 {
 
 /// Uniform on `[lo, hi]`, total where `random_range` is not: that one panics
 /// on an empty range, which is the bug commit 996fcf9 had to go back and fix.
-fn uniform(random: &mut impl Rng, lo: f64, hi: f64) -> f64 {
+pub(crate) fn uniform(random: &mut impl Rng, lo: f64, hi: f64) -> f64 {
     lo + (hi - lo) * random.random::<f64>()
 }
 
@@ -980,26 +1290,18 @@ pub fn plan_flick_at(
     // Nothing in the pipeline carries a target id, so a fresh acquisition is
     // inferred from silence: if nothing was aimed at for a while, the leftover
     // fraction describes a move toward a target that no longer exists.
-    let gap = Duration::from_millis(cfg.gap_ms);
-    let stale = state
-        .last_flick
-        .is_none_or(|end| now.saturating_duration_since(end) > gap);
-    if stale && state.ready_at.is_none() {
+    let Some(stale) = gate_reaction(
+        state.last_flick,
+        &mut state.ready_at,
+        cfg.gap_ms,
+        (cfg.react_min_ms, cfg.react_max_ms),
+        now,
+        random,
+    ) else {
+        return None; // still watching; the hand has not started yet
+    };
+    if stale {
         state.carry = (0., 0.);
-        let (lo, hi) = (
-            cfg.react_min_ms.min(cfg.react_max_ms),
-            cfg.react_min_ms.max(cfg.react_max_ms),
-        );
-        if hi > 0 {
-            let wait = lo + ((hi - lo) as f64 * random.random::<f64>()).round() as u64;
-            state.ready_at = Some(now + Duration::from_millis(wait));
-        }
-    }
-    if let Some(ready) = state.ready_at {
-        if now < ready {
-            return None; // still watching; the hand has not started yet
-        }
-        state.ready_at = None;
     }
 
     // Woodworth: a ballistic reach stops short on purpose, because overshooting
@@ -1776,6 +2078,25 @@ mod tests {
             (lo - hi).abs() < 0.25 * lo.max(hi),
             "same movement took {lo:.1} ms at 400 dpi and {hi:.1} ms at 1600 dpi"
         );
+    }
+
+    /// V4 answers a query as `<result>\r\n>>> `, and the reply can arrive
+    /// split across reads or behind the tail of something else.
+    #[test]
+    fn a_getpos_reply_is_read_out_of_whatever_arrives_with_it() {
+        assert_eq!(parse_getpos("km.getpos(123,456)\r\n>>> "), Some((123, 456)));
+        assert_eq!(parse_getpos("km.getpos(0,0)"), Some((0, 0)));
+        assert_eq!(parse_getpos("km.getpos(-5, 32766)\r\n"), Some((-5, 32766)));
+        // Button bytes share the wire and may lead the reply.
+        assert_eq!(parse_getpos("\u{1}\u{8}km.getpos(7,9)\r\n>>> "), Some((7, 9)));
+    }
+
+    #[test]
+    fn half_a_getpos_reply_is_not_a_position() {
+        for partial in ["", "km.getpos(", "km.getpos(12", "km.getpos(12,", ">>> ", "ERR"] {
+            assert_eq!(parse_getpos(partial), None, "{partial:?}");
+        }
+        assert_eq!(parse_getpos("km.getpos(a,b)"), None);
     }
 
     #[test]

@@ -16,10 +16,12 @@ use crate::mouse::MouseVirtual;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// Bins are 1 ms, which is the grid both planners read.
-const BIN: Duration = Duration::from_millis(1);
+/// One `km.getpos` round trip measures about a millisecond end to end, which
+/// is already the grid the planners read, so the gap between polls only has to
+/// be short enough not to add to it.
+const POLL_GAP: Duration = Duration::from_micros(200);
 
 /// A ring of 1 ms bins, newest last, in the planner's x-right/y-up counts.
 #[derive(Debug, Clone)]
@@ -65,25 +67,6 @@ pub fn absorb(observed: i64, owed: &mut i64) -> i64 {
     observed - take
 }
 
-/// Spread one polled displacement across the bins it covers.
-///
-/// A poll that took 7 ms is seven bins of real time, not one report: handing
-/// the planner a single 7-count spike would be a velocity the hand never had.
-/// Whole counts go first and the remainder lands on the newest bin, so the sum
-/// is exactly what was observed.
-pub fn spread(delta: (i32, i32), bins: usize) -> Vec<[f32; 2]> {
-    let bins = bins.max(1);
-    let mut out = vec![[0f32; 2]; bins];
-    for (axis, total) in [delta.0, delta.1].into_iter().enumerate() {
-        let step = total / bins as i32;
-        for bin in out.iter_mut() {
-            bin[axis] = step as f32;
-        }
-        out[bins - 1][axis] += (total - step * bins as i32) as f32;
-    }
-    out
-}
-
 /// Polls `km.getpos` in the background and keeps the last `capacity` bins.
 pub struct CursorTrack {
     output: triple_buffer::Output<Bins>,
@@ -94,7 +77,7 @@ pub struct CursorTrack {
 impl CursorTrack {
     /// `None` when the firmware will not answer `km.getpos`, which is the
     /// honest answer on anything older than V4.026.
-    pub fn start(mouse: Arc<MouseVirtual>, hz: u32, capacity: usize) -> Option<Self> {
+    pub fn start(mouse: Arc<MouseVirtual>, capacity: usize) -> Option<Self> {
         let first = match mouse.getpos() {
             Ok(position) => position,
             Err(e) => {
@@ -102,39 +85,29 @@ impl CursorTrack {
                 return None;
             }
         };
-        tracing::info!("[Cursor] tracking from {first:?} at {hz} Hz");
+        tracing::info!("[Cursor] tracking from {first:?}");
 
         let (mut input, output) = triple_buffer::triple_buffer(&Bins::new(capacity));
         let running = Arc::new(AtomicBool::new(true));
         let keep = running.clone();
-        let period = Duration::from_micros(1_000_000 / hz.clamp(1, 1000) as u64);
 
         thread::spawn(move || {
             let mut bins = Bins::new(capacity);
             let mut last = first;
             let mut owed = (0i64, 0i64);
-            let mut at = Instant::now();
             while keep.load(Ordering::Acquire) {
-                thread::sleep(period);
+                thread::sleep(POLL_GAP);
                 let Ok(now) = mouse.getpos() else { continue };
-                let elapsed = at.elapsed();
-                at = Instant::now();
-                // What this process injected is not the hand. Measured on the
-                // device: `km.getpos` moves one unit per count we send, so
-                // what is left after taking ours out is the physical movement.
+                // What this process injected is not the hand. `km.getpos`
+                // moves one unit per count we send, measured on the device.
                 let ours = mouse.take_injected();
                 owed = (owed.0 + ours.0, owed.1 + ours.1);
-                let moved = (
-                    absorb((now.0 - last.0) as i64, &mut owed.0),
-                    absorb((now.1 - last.1) as i64, &mut owed.1),
-                );
+                bins.push([
+                    absorb((now.0 - last.0) as i64, &mut owed.0) as f32,
+                    // y comes back screen-down; the planner reads y-up.
+                    -absorb((now.1 - last.1) as i64, &mut owed.1) as f32,
+                ]);
                 last = now;
-                // y comes back screen-down; the planner reads y-up.
-                let delta = (moved.0 as i32, -moved.1 as i32);
-                let covered = (elapsed.as_micros() / BIN.as_micros()).max(1) as usize;
-                for bin in spread(delta, covered) {
-                    bins.push(bin);
-                }
                 input.write(bins.clone());
             }
         });
@@ -204,34 +177,6 @@ mod tests {
         assert_eq!(absorb(17, &mut owed), 17);
         assert_eq!(absorb(-17, &mut owed), -17);
         assert_eq!(owed, 0);
-    }
-
-    /// The sum has to survive: the planner reads a displacement, and losing a
-    /// count to rounding moves the handoff.
-    #[test]
-    fn a_polled_displacement_keeps_its_total() {
-        for delta in [(7, -3), (1, 0), (-13, 29), (0, 0), (100, -100)] {
-            for bins in [1usize, 2, 7, 10] {
-                let out = spread(delta, bins);
-                assert_eq!(out.len(), bins);
-                let total: (f32, f32) = out
-                    .iter()
-                    .fold((0., 0.), |sum, bin| (sum.0 + bin[0], sum.1 + bin[1]));
-                assert_eq!(
-                    (total.0 as i32, total.1 as i32),
-                    delta,
-                    "{delta:?} over {bins} bins"
-                );
-            }
-        }
-    }
-
-    /// A poll covering several milliseconds is several bins of real time, not
-    /// one spike the hand never produced.
-    #[test]
-    fn a_slow_poll_is_spread_rather_than_spiked() {
-        let out = spread((10, 0), 10);
-        assert!(out.iter().all(|bin| bin[0] == 1.));
     }
 
     #[test]

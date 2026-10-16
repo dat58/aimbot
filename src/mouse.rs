@@ -780,9 +780,12 @@ pub enum MoveRequest {
     AbCurves {
         profile: usize,
         delta: (f64, f64),
-        /// Target radius in mouse counts, which is what the static planner
-        /// reads; `width_px` is the same thing in screen pixels for Fitts.
+        /// The target's own radius in mouse counts, which is what the static
+        /// planner reads as how precise it has to be.
         radius: f64,
+        /// The dead zone in counts — where the aim loop stops asking, and so
+        /// where a stroke is close enough to stop.
+        settle: f64,
         reach_px: f32,
         width_px: f32,
     },
@@ -936,6 +939,7 @@ fn play_request<F: Fn() -> bool>(
             profile,
             delta,
             radius,
+            settle,
             reach_px,
             width_px,
         } => {
@@ -943,7 +947,7 @@ fn play_request<F: Fn() -> bool>(
                 tracing::error!("[Mouse] profile {profile} does not drive the neural mover");
                 return None;
             };
-            match state.plan(delta, radius, random) {
+            match state.plan(delta, radius, settle, random) {
                 Plan::Play(stroke) => {
                     tracing::debug!(
                         "[AbCurves] {:?}: {:.2} counts over {} ms, radius {:.1}",

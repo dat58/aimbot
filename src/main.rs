@@ -251,12 +251,6 @@ fn main() -> Result<()> {
                 // One feed, shared: the pointer is one pointer however many
                 // profiles want to watch it.
                 if ab.iter().flatten().any(AbAim::wants_cursor) {
-                    let hz = config
-                        .profiles
-                        .iter()
-                        .map(|profile| profile.abcurves.getpos_hz)
-                        .max()
-                        .unwrap_or(100);
                     let bins = config
                         .profiles
                         .iter()
@@ -268,10 +262,11 @@ fn main() -> Result<()> {
                         if !state.wants_cursor() {
                             continue;
                         }
-                        state.track(CursorTrack::start(mouse.clone(), hz, bins));
+                        state.track(CursorTrack::start(mouse.clone(), bins));
                         tracing::info!("[Cursor] profile {index} reads the pointer back");
                     }
                 }
+
                 let trigger = trigger.clone();
                 let button1 = esp_button1.clone();
                 let button2 = esp_button2.clone();
@@ -329,12 +324,12 @@ fn main() -> Result<()> {
                                     }
                                 );
                             }
-                            let (destination, min_zone) = match profile.aim_mode {
+                            let (destination, target_zone) = match profile.aim_mode {
                                 Some(mode) => aim.aim_as(mode, &bboxes, &crosshair, &mut random),
                                 None => aim.aim(&bboxes, &crosshair, &mut random),
                             }
                             .unwrap();
-                            let min_zone = min_zone * profile.scale_min_zone;
+                            let min_zone = target_zone * profile.scale_min_zone;
                             let dist = destination.l2_distance(&crosshair).sqrt();
 
                             #[cfg(not(feature = "disable-mouse"))]
@@ -376,11 +371,20 @@ fn main() -> Result<()> {
                                         Mover::AbCurves => MoveRequest::AbCurves {
                                             profile: profile_index,
                                             delta: (dx, dy),
-                                            // The static planner wants the
-                                            // radius it may land inside, in
-                                            // counts; `width_px` is the same
-                                            // thing doubled for Fitts.
+                                            // The target's own radius, not
+                                            // our dead zone: the model reads
+                                            // it as how precise it has to be.
+                                            // `scale_min_zone` tunes when to
+                                            // stop aiming and has no business
+                                            // in it.
                                             radius: mouse_counts(
+                                                (target_zone, 0.),
+                                                config.frame_to_screen,
+                                                config.game_sens,
+                                                config.mouse_dpi,
+                                            )
+                                            .0,
+                                            settle: mouse_counts(
                                                 (min_zone, 0.),
                                                 config.frame_to_screen,
                                                 config.game_sens,

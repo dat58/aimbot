@@ -762,6 +762,59 @@ Measured for `hybrid`, 40 draws per row:
 | 60, 0 | 38, 1 | 26, −5 | 64, −4 | 107% |
 | 35, 35 | 28, 26 | 15, 5 | 43, 31 | 107% |
 
+### Which planner takes which reach
+
+The static planner needs the handoff to sit outside the target and at least 8
+counts from it, so the band of legal handoffs closes when the reach stops being
+bigger than the target. A band narrower than 3 counts is refused too: the
+finish starts overshooting there, measured at 154% of the ask on a 27-count
+reach whose band was 1.1 counts wide, against 111% on a 108-count reach.
+
+With `game_sens = 0.38` and `mouse_dpi = 1000` a frame pixel is 0.25 counts, so
+for a 192 px detection region:
+
+| Reach | Counts | Static | Hybrid cover |
+| --- | --- | --- | --- |
+| 53 px | 13 | no band | — |
+| 107 px | 27 | marginal | 149% |
+| 150 px | 35 | yes | 126% |
+| 190 px | 48 | yes | 120% |
+| 426 px | 108 | yes | 111% |
+
+Everything below that goes to `move_ab_fallback`, which is the continuous
+planner by default.
+
+### The continuous planner is not a settling planner here
+
+Two things made it unusable at first, both measured on a 12-count ask:
+
+| | Stroke |
+| --- | --- |
+| Chasing the last count, pipeline reset each reach | 115-230 ms |
+| Chasing the last count, pipeline carried over | 128 ms |
+| Stopping 20% out, pipeline carried over | **44 ms** |
+
+**Never reset the pipeline between reaches.** A reset puts the planner back at
+rest and it has to repeat the acceleration every time. Its idea of where the
+cursor is drifting from the truth costs nothing, because the target is always
+`rendered_xy + delta` and the reports are relative — the offset appears on both
+sides and cancels.
+
+**Stop early.** `move_ab_settle` leaves a fraction of the reach for the next
+frame, the way the flick model's gain does. The last counts are the model's
+micro-adjustment tail: on a 12-count ask, stopping 3 counts out takes 18 ms and
+covers 74%, while chasing the last count takes 128 ms to cover 72%. The aim
+loop re-measures every frame, so stopping early is free.
+
+Across the range that gives:
+
+| Ask (counts) | Stroke | Covered |
+| --- | --- | --- |
+| 3 | 30 ms | 65% |
+| 12 | 44 ms | 89% |
+| 48 | 74 ms | 79% |
+| 108 | 98 ms | 68% |
+
 ### Settings
 
 All of these live inside a `[[profile]]`.
@@ -769,9 +822,10 @@ All of these live inside a `[[profile]]`.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `move_ab_planner` | `hybrid` | See the table above |
-| `move_ab_fallback` | `continuous` | `continuous` or `smooth`; where a reach goes when the neural path turns it away |
+| `move_ab_fallback` | `continuous` | `continuous` or `smooth`; where a reach goes when the static path turns it away. Short corrections always land here |
 | `move_ab_max_duration_ms` | `250` | Heads longer than this are dropped before the draw |
 | `move_ab_lead` | `1.2` | How far past the target the approach flick is aimed under `hybrid`. The handoff must land while the hand is still moving, and a flick aimed exactly at the target is already slowing by then: over 40 draws of a 323-count reach the handoff was accepted 31 times at `1.0` and 40 at `1.2` |
+| `move_ab_settle` | `0.2` | How much of a continuous reach to leave for the next frame. The planner's last counts are its micro-adjustment tail and cost most of the time |
 | `move_ab_handoff` | `0.5` | Where inside the allowed window to hand over, `0` as early as the model permits and `1` as late |
 | `move_ab_lock_axis` | `false` | Hold the physical mouse axes still while a stroke plays. Never touches the buttons, so a shot still goes through, and the axes are released on every exit including an abandoned stroke. Verified on V4: `km.lock_mx(1)` passes an injected move through unchanged and leaves `km.left()` reading `0` |
 | `move_ab_fov_deg` | — | **Required by `continuous`.** The game's horizontal FOV; the continuous planner works in angles and nothing else in the configuration carries one |
@@ -779,7 +833,6 @@ All of these live inside a `[[profile]]`.
 | `move_ab_model_dir` | `assets/abcurves` | The 4.7 MB model directory |
 | `move_ab_profile` | `assets/abcurves_profile.i16` | Renderer texture window, exactly 256 reports of two little-endian `i16` |
 | `move_ab_max_stroke_ms` | `600` | Safety rail on a continuous stroke |
-| `move_ab_getpos_hz` | `1000` | Poll rate under `planner = "getpos"`. One round trip measures 0.22 ms, so the planner's own 1 kHz grid fits with room to spare |
 | `move_ab_capture_bins` | `1024` | 1 ms bins of cursor history kept under `planner = "getpos"` |
 
 ### Choosing a head

@@ -41,6 +41,11 @@ const PROFILE_REPORTS: usize = 256;
 const MIN_REMAINING: f64 = 8.;
 /// The radius range the model was trained over starts here.
 const MIN_RADIUS: f64 = 2.;
+/// A handoff band narrower than this puts the geometry at the edge of what the
+/// model handles, and the finish starts overshooting: measured, a 27-count
+/// reach whose band was 1.1 counts wide came back 154% of the ask, while a
+/// 5.7-count band came back 120% and a wider one 108%.
+const MIN_WINDOW: f64 = 3.;
 /// Consecutive all-zero reports that count as the hand having come to rest.
 /// Only the fallback for a stroke that stops short; arriving is detected from
 /// the counts still owed. Generous because abcurves' reports are sparse.
@@ -246,8 +251,10 @@ impl Settle {
         }
     }
 
-    fn arrived(&self, left: [f64; 2]) -> bool {
-        if left[0].abs() < 1. && left[1].abs() < 1. {
+    /// Inside the target is arrived; the counts after that are the model's
+    /// micro-adjustment tail, which costs time and moves almost nothing.
+    fn arrived(&self, left: [f64; 2], radius: f64) -> bool {
+        if left[0].hypot(left[1]) <= radius.max(1.) {
             return true;
         }
         self.moved && self.zeros >= REST_RUN
@@ -419,8 +426,14 @@ impl AbAim {
         self.cfg.planner == Planner::GetPos
     }
 
-    pub fn plan(&mut self, delta: (f64, f64), radius: f64, random: &mut impl Rng) -> Plan {
-        self.plan_at(delta, radius, random, Instant::now())
+    pub fn plan(
+        &mut self,
+        delta: (f64, f64),
+        radius: f64,
+        settle_at: f64,
+        random: &mut impl Rng,
+    ) -> Plan {
+        self.plan_at(delta, radius, settle_at, random, Instant::now())
     }
 
     /// [`Self::plan`] with the clock injected, so the reaction window is
@@ -429,6 +442,7 @@ impl AbAim {
         &mut self,
         delta: (f64, f64),
         radius: f64,
+        settle_at: f64,
         random: &mut impl Rng,
         now: Instant,
     ) -> Plan {
@@ -459,7 +473,7 @@ impl AbAim {
             // The hand did the approach; read it back and finish it.
             Planner::GetPos => {
                 let Some(track) = self.track.as_mut() else {
-                    return self.fall_back(reach);
+                    return self.fall_back(reach, settle_at);
                 };
                 let prefix = track.recent(PREFIX_BINS);
                 Ok(self.finish(&prefix, target, radius, random))
@@ -467,8 +481,9 @@ impl AbAim {
             Planner::Hybrid => {
                 let Some((window, bc)) = self.handoff_window(target, radius) else {
                     tracing::debug!("[AbCurves] no handoff window for this geometry");
-                    return self.fall_back(reach);
+                    return self.fall_back(reach, settle_at);
                 };
+                self.last_flick = Some(now);
                 return Plan::Approach {
                     aimed: (reach.0 * self.cfg.lead, reach.1 * self.cfg.lead),
                     target,
@@ -478,24 +493,24 @@ impl AbAim {
                 };
             }
             Planner::Static => Ok(self.plan_static(target, radius, random)),
-            Planner::Continuous => self.plan_continuous(reach),
+            Planner::Continuous => self.plan_continuous(reach, settle_at),
         };
         let stroke = match outcome {
             Ok(Some(stroke)) => stroke,
-            Ok(None) => return self.fall_back(reach),
+            Ok(None) => return self.fall_back(reach, settle_at),
             Err(e) => {
                 tracing::debug!("[AbCurves] {e}");
-                return self.fall_back(reach);
+                return self.fall_back(reach, settle_at);
             }
         };
         self.last_flick = Some(now + Duration::from_millis(stroke.reports.len() as u64));
         Plan::Play(stroke)
     }
 
-    fn fall_back(&mut self, reach: (f64, f64)) -> Plan {
+    fn fall_back(&mut self, reach: (f64, f64), settle_at: f64) -> Plan {
         match self.cfg.fallback {
             Fallback::Smooth => Plan::Smooth,
-            Fallback::Continuous => match self.plan_continuous(reach) {
+            Fallback::Continuous => match self.plan_continuous(reach, settle_at) {
                 Ok(Some(stroke)) => {
                     self.last_flick =
                         Some(Instant::now() + Duration::from_millis(stroke.reports.len() as u64));
@@ -521,6 +536,9 @@ impl AbAim {
         let window =
             Movement::eligible_remaining([0., 0.], target, radius.max(MIN_RADIUS), Policy::Auto)?;
         let (lower, upper) = (*window.start(), *window.end());
+        if upper - lower < MIN_WINDOW {
+            return None;
+        }
         let bc = upper - (upper - lower) * self.cfg.handoff.clamp(0., 1.);
         Some(((lower, upper), bc))
     }
@@ -586,35 +604,53 @@ impl AbAim {
                 return None;
             }
         };
-        let model = pipeline.model();
-        let cap = self.smooth.max_counts.clamp(1, i32::MAX as i64);
-        let mut reports = Vec::with_capacity(stream.duration_ms());
-        while !stream.complete() {
-            match stream.step(model) {
-                // Back to the aim loop's y-down convention.
-                Ok(report) => {
-                    reports.push([clamp_count(report[0], cap), clamp_count(-report[1], cap)])
-                }
-                Err(e) => {
-                    tracing::debug!("[AbCurves] step: {e}");
-                    return None;
-                }
+        let rendered = match stream.render_remaining(pipeline.model()) {
+            Ok(reports) => reports,
+            Err(e) => {
+                tracing::debug!("[AbCurves] render: {e}");
+                return None;
             }
-        }
+        };
+        let cap = self.smooth.max_counts.clamp(1, i32::MAX as i64);
         Some(Stroke {
-            reports,
+            // Back to the aim loop's y-down convention.
+            reports: rendered
+                .into_iter()
+                .map(|report| [clamp_count(report[0], cap), clamp_count(-report[1], cap)])
+                .collect(),
             source: Source::Static { head },
         })
     }
 
-    fn plan_continuous(&mut self, reach: (f64, f64)) -> Result<Option<Stroke>> {
+    /// Drive the continuous planner until it is inside the target.
+    ///
+    /// The settle threshold is the target radius, which is what the crate's own
+    /// `continuous_to_point` does. Waiting for the last count instead turns a
+    /// short correction into the model's full micro-adjustment tail: measured,
+    /// a 13-count ask came back as a 115 ms stroke.
+    fn plan_continuous(&mut self, reach: (f64, f64), dead_zone: f64) -> Result<Option<Stroke>> {
+        // Leave the tail for the next frame rather than paying for it here.
+        let settle_at = dead_zone.max(self.cfg.settle * reach.0.hypot(reach.1));
         let cap = self.smooth.max_counts.clamp(1, i32::MAX as i64);
-        let rail = Duration::from_millis(self.cfg.max_stroke_ms);
+        let budget = self
+            .cfg
+            .max_duration_ms
+            .min(self.cfg.max_stroke_ms as usize)
+            .max(1);
         let scale = self.scale;
         let Some(pipeline) = self.continuous.as_mut() else {
             return Ok(None);
         };
 
+        // Anchored on where the pipeline believes it is, never reset. A reset
+        // puts the planner back at rest, and the acceleration it then has to
+        // repeat is where the time goes: measured, resetting every reach took
+        // a 12-count ask from 18 ms to over 200. Carrying the velocity between
+        // reaches is the whole point of a continuous planner.
+        //
+        // Its belief drifting from the real cursor costs nothing, because the
+        // target is always `rendered_xy + delta` and the reports are relative:
+        // whatever offset the belief carries appears on both sides and cancels.
         let from = pipeline.rendered_xy();
         let target = [
             from[0] + reach.0 * scale[0],
@@ -628,7 +664,6 @@ impl AbAim {
 
         let mut reports = Vec::new();
         let mut settle = Settle::default();
-        let budget = rail.as_millis() as usize;
         while reports.len() < budget {
             self.planned_us += SAMPLE_US;
             let advance = pipeline
@@ -643,10 +678,16 @@ impl AbAim {
                 (target[0] - rendered[0]) / scale[0].abs(),
                 (target[1] - rendered[1]) / scale[1].abs(),
             ];
-            if settle.arrived(left) {
+            if settle.arrived(left, settle_at) {
                 break;
             }
         }
+        reports.truncate(
+            reports
+                .iter()
+                .rposition(|report| *report != [0, 0])
+                .map_or(0, |last| last + 1),
+        );
         if reports.is_empty() {
             return Ok(None);
         }
@@ -944,12 +985,12 @@ mod tests {
     #[test]
     fn coming_to_rest_ends_a_stroke_that_stopped_short() {
         let mut settle = Settle::default();
-        assert!(!settle.arrived([50., 0.]), "nothing has moved yet");
+        assert!(!settle.arrived([50., 0.], 1.), "nothing has moved yet");
         settle.observe([4, 0]);
         for _ in 0..REST_RUN {
             settle.observe([0, 0]);
         }
-        assert!(settle.arrived([50., 0.]));
+        assert!(settle.arrived([50., 0.], 1.));
     }
 
     /// Speed starts at zero as well as ending there, so a slow opening is a run
@@ -960,13 +1001,26 @@ mod tests {
         for _ in 0..REST_RUN * 2 {
             settle.observe([0, 0]);
         }
-        assert!(!settle.arrived([50., 0.]));
+        assert!(!settle.arrived([50., 0.], 1.));
+    }
+
+    /// Inside the target is arrived. Chasing the last count instead is where
+    /// the time goes: the same ask took 18 ms stopping 3 counts out and 128 ms
+    /// stopping 1 count out, for the same coverage.
+    #[test]
+    fn a_stroke_stops_once_it_is_inside_the_target() {
+        let settle = Settle::default();
+        assert!(settle.arrived([4., 0.], 5.), "4 counts out of a 5 count zone");
+        assert!(settle.arrived([3., 4.], 5.), "exactly on the edge");
+        assert!(!settle.arrived([4., 4.], 5.), "5.7 counts is still outside");
+        // A zone under one count cannot be tighter than the integer grid.
+        assert!(settle.arrived([0.5, 0.5], 0.));
     }
 
     #[test]
     fn being_inside_one_count_ends_the_stroke_whatever_the_reports_say() {
         let settle = Settle::default();
-        assert!(settle.arrived([0.4, -0.9]));
-        assert!(!settle.arrived([0.4, -1.8]));
+        assert!(settle.arrived([0.4, -0.9], 1.));
+        assert!(!settle.arrived([0.4, -1.8], 1.));
     }
 }

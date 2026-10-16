@@ -346,6 +346,10 @@ impl std::fmt::Display for Planner {
 }
 
 /// Where a reach goes when the static planner cannot take it.
+///
+/// The static planner needs the reach to be bigger than the target, so short
+/// corrections always land here. `continuous` keeps those on the neural model
+/// too; `smooth` hands them to the flick model instead.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Fallback {
@@ -373,13 +377,6 @@ impl std::fmt::Display for Fallback {
 pub struct AbConfig {
     #[serde(rename = "move_ab_planner")]
     pub planner: Planner,
-    /// How often the cursor is read back when `planner = "getpos"`.
-    ///
-    /// Measured on the device, one `km.getpos` round trip is 0.22 ms, so the
-    /// planner's own 1 kHz grid is comfortably inside what the link sustains
-    /// and needs no interpolation between samples.
-    #[serde(rename = "move_ab_getpos_hz")]
-    pub getpos_hz: u32,
     #[serde(rename = "move_ab_fallback")]
     pub fallback: Fallback,
     /// Heads longer than this are dropped before the draw.
@@ -389,6 +386,17 @@ pub struct AbConfig {
     /// the buttons, so a shot still goes through.
     #[serde(rename = "move_ab_lock_axis")]
     pub lock_axis: bool,
+    /// How much of a continuous reach to leave for the next frame, as a
+    /// fraction.
+    ///
+    /// The planner's last counts are its micro-adjustment tail and they cost
+    /// most of the time: measured on a 12-count ask, stopping 3 counts out
+    /// takes 18 ms and covers 74%, while chasing the last count takes 128 ms
+    /// to cover 72%. Stopping early is free — the aim loop re-measures every
+    /// frame — so this is proportional rather than absolute, which keeps a
+    /// stroke about as quick whatever the reach.
+    #[serde(rename = "move_ab_settle")]
+    pub settle: f64,
     /// Where inside the allowed handoff window to hand over, `0` as early as
     /// the model permits and `1` as late.
     ///
@@ -432,10 +440,10 @@ impl Default for AbConfig {
     fn default() -> Self {
         Self {
             planner: Planner::Hybrid,
-            getpos_hz: 1000,
             fallback: Fallback::Continuous,
             max_duration_ms: 250,
             lock_axis: false,
+            settle: 0.2,
             handoff: 0.5,
             approach_bins: 100,
             lead: 1.2,
@@ -457,12 +465,22 @@ impl AbConfig {
                 self.model_seed
             );
         }
-        if self.planner == Planner::Continuous
-            && !(self.fov_deg.is_finite() && self.fov_deg > 0. && self.fov_deg < 180.)
-        {
+        // The continuous pipeline is loaded whenever anything can route to it,
+        // and it is the one that works in angles.
+        let needs_fov =
+            self.planner == Planner::Continuous || self.fallback == Fallback::Continuous;
+        if needs_fov && !(self.fov_deg.is_finite() && self.fov_deg > 0. && self.fov_deg < 180.) {
             bail!(
-                "profile {profile:?}: move_ab_planner = \"continuous\" needs move_ab_fov_deg, \
-                 the game's horizontal field of view in degrees"
+                "profile {profile:?}: move_ab_fov_deg is needed here (planner {} falling back to \
+                 {}) and must be the game's horizontal field of view in degrees",
+                self.planner,
+                self.fallback
+            );
+        }
+        if !(self.settle.is_finite() && (0. ..1.).contains(&self.settle)) {
+            bail!(
+                "profile {profile:?}: move_ab_settle = {} must be between 0 and 1",
+                self.settle
             );
         }
         if !(self.handoff.is_finite() && (0. ..=1.).contains(&self.handoff)) {
@@ -492,12 +510,7 @@ impl AbConfig {
                 self.capture_bins
             );
         }
-        if self.planner == Planner::GetPos && !(1..=1000).contains(&self.getpos_hz) {
-            bail!(
-                "profile {profile:?}: move_ab_getpos_hz = {} must be between 1 and 1000",
-                self.getpos_hz
-            );
-        }
+
         Ok(())
     }
 }
@@ -992,6 +1005,8 @@ mover = "abcurves"
 move_smooth_gain = 0.885
 move_smooth_auto_click = true
 move_ab_planner = "static"
+move_ab_fallback = "continuous"
+move_ab_fov_deg = 103.0
 move_ab_max_duration_ms = 180
 move_ab_lock_axis = true
 move_ab_model_seed = 23
@@ -1012,15 +1027,17 @@ scale_min_zone = 0.8
         assert_eq!(neural.smooth.gain, 0.885);
         assert!(neural.smooth.auto_click);
         assert_eq!(neural.abcurves.planner, Planner::Static);
-        assert_eq!(neural.abcurves.fallback, Fallback::Continuous);
+        assert_eq!(neural.abcurves.fallback, Fallback::Continuous);  // set in the fixture
         assert_eq!(neural.abcurves.max_duration_ms, 180);
         assert!(neural.abcurves.lock_axis);
         assert_eq!(neural.abcurves.model_seed, 23);
         // Untouched keys keep their defaults on both sides.
         assert_eq!(neural.abcurves.handoff, AbConfig::default().handoff);
         assert_eq!(neural.smooth.tremor, SmoothConfig::default().tremor);
-        // A profile that names no neural keys still gets a usable AbConfig.
+        // A profile that names no neural keys still gets a usable AbConfig,
+        // and short corrections stay on the neural model by default.
         assert_eq!(config.profiles[1].abcurves, AbConfig::default());
+        assert_eq!(config.profiles[1].abcurves.fallback, Fallback::Continuous);
     }
 
     /// The split must not cost the typo detection on either side.
@@ -1036,24 +1053,25 @@ scale_min_zone = 0.8
         }
     }
 
+    /// The continuous pipeline is loaded whenever anything can route to it, so
+    /// the field of view it needs is required then too — not only when it is
+    /// the chosen planner. A live run found this the hard way.
     #[test]
-    fn the_continuous_planner_is_refused_without_a_field_of_view() {
-        let src = with(&AB_PROFILE.replace(
-            "move_ab_planner = \"static\"",
-            "move_ab_planner = \"continuous\"",
-        ));
-        let err = Config::parse(&src).unwrap_err().to_string();
-        assert!(err.contains("move_ab_fov_deg"), "{err}");
+    fn a_field_of_view_is_required_wherever_the_continuous_planner_can_be_reached() {
+        let no_fov = AB_PROFILE.replace("move_ab_fov_deg = 103.0", "");
+        // The fixture keeps the static planner and a continuous fallback, so
+        // the pipeline is loaded even though it is not the chosen planner.
+        let err = Config::parse(&with(&no_fov)).unwrap_err().to_string();
+        assert!(err.contains("move_ab_fov_deg"), "as a fallback: {err}");
 
-        // With one it parses.
-        let ok = with(&AB_PROFILE.replace(
-            "move_ab_planner = \"static\"",
-            "move_ab_planner = \"continuous\"\nmove_ab_fov_deg = 103.0",
-        ));
-        assert_eq!(
-            Config::parse(&ok).unwrap().profiles[0].abcurves.planner,
-            Planner::Continuous
-        );
+        let chosen = no_fov.replace("move_ab_planner = \"static\"", "move_ab_planner = \"continuous\"");
+        let err = Config::parse(&with(&chosen)).unwrap_err().to_string();
+        assert!(err.contains("move_ab_fov_deg"), "as the planner: {err}");
+
+        // Nothing can reach it, so nothing needs the angle.
+        let unreachable =
+            with(&no_fov.replace("move_ab_fallback = \"continuous\"", "move_ab_fallback = \"smooth\""));
+        assert!(Config::parse(&unreachable).is_ok());
     }
 
     #[test]

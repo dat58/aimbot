@@ -1,232 +1,113 @@
+//! The human-flick movement: Fitts's law for how long a reach takes, a
+//! lognormal speed profile for its shape, and signal-dependent noise over the
+//! top of it.
+//!
+//! Plans a stroke, then plays it one report at a time against a device's own
+//! deadlines. The flick deliberately stops short; the next frame sees what is
+//! left and plans the corrective submovement, which is what makes the
+//! correction visually guided rather than dead reckoning.
+
+use super::constant::*;
+use super::{Aim, ClickPlan, Mover};
 use crate::config::{SmoothConfig, poll_hz_for_baud};
-use anyhow::{Result, bail};
-use crossbeam::queue::ArrayQueue;
+use crate::mouse::MouseDevice;
+use anyhow::Result;
 use rand::prelude::*;
-use serialport::{self, SerialPort, available_ports};
-use std::io::Write;
 use std::{
     f64::consts::{PI, TAU},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
     thread::sleep,
     time::{Duration, Instant},
 };
 
-const BAUD_CHANGE_COMMAND: [u8; 9] = [0xDE, 0xAD, 0x05, 0x00, 0xA5, 0x00, 0x09, 0x3D, 0x00];
-const VERIFY_COMMAND: &[u8] = b"km.version()\r\n";
-const DEFAULT_BAUD_RATE: u32 = 115_200;
-const ALLOWED_BAUD_RATE: [u32; 3] = [115_200, 2_000_000, 4_000_000];
-const CRLF: &str = "\r\n";
-/// `thread::sleep` on Linux overshoots by tens of microseconds, so below this
-/// it is cheaper to fire a report a touch early than to oversleep it.
-const SLEEP_FLOOR: Duration = Duration::from_micros(150);
-/// How long a click holds the button down, in milliseconds. The range MAKCU's
-/// own `km.click` draws from by default, which is as good a reference as any
-/// for what a click should look like on the wire.
-const CLICK_HOLD_MS: (u64, u64) = (35, 75);
-/// How long [`handle_mouse`] parks when the queue is empty. A single command
-/// already costs ~0.6 ms over usbip, so a wake-up granularity well inside that
-/// is not what limits this.
-const IDLE_POLL: Duration = Duration::from_micros(200);
-
-pub struct MouseVirtual {
-    serial: Mutex<Box<dyn SerialPort>>,
-    pressed: [AtomicBool; 5],
-    /// Whether this firmware answers `km.move_now`. Probed once at connect,
-    /// because an unknown command is answered with silence rather than an
-    /// error: asking for `move_now` on firmware without it would swallow every
-    /// report and stop the mouse dead with nothing in the log to say why.
-    move_now: AtomicBool,
+/// One mouse report: the integer counts that go on the wire at `at`, measured
+/// from the first report of the flick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveStep {
+    pub dx: i32,
+    pub dy: i32,
+    pub at: Duration,
 }
 
-impl MouseVirtual {
-    pub fn new(port: &str, baud: u32) -> Result<Self> {
-        tracing::debug!("All available serial port: {:?}", available_ports());
-        if !ALLOWED_BAUD_RATE.contains(&baud) {
-            bail!("Baud rate out of range, allowed: {:?}", ALLOWED_BAUD_RATE);
-        }
-        let mut serial = serialport::new(port, baud)
-            .timeout(Duration::from_millis(300))
-            .open()?;
-        let mut serial = match Self::check_km_version_ok(&mut serial) {
-            Ok(_) => {
-                drop(serial);
-                sleep(Duration::from_millis(300));
-                let mut serial = serialport::new(port, baud)
-                    .timeout(Duration::from_millis(100))
-                    .open()?;
-                serial.write_all(format!("km.buttons(1){CRLF}").as_bytes())?;
-                serial
-            }
-            Err(_) => {
-                {
-                    drop(serial);
-                    sleep(Duration::from_millis(300));
-                    tracing::info!(
-                        "Check KM version unavailable at baud: {}, try change baud rate...",
-                        baud
-                    );
-                    let mut serial = serialport::new(port, DEFAULT_BAUD_RATE)
-                        .timeout(Duration::from_millis(300))
-                        .open()?;
-                    sleep(Duration::from_millis(200));
-                    serial.write_all(&BAUD_CHANGE_COMMAND)?;
-                    drop(serial);
-                    sleep(Duration::from_millis(200));
-                }
-                {
-                    let mut serial = serialport::new(port, baud)
-                        .timeout(Duration::from_millis(300))
-                        .open()?;
-                    sleep(Duration::from_millis(200));
-                    Self::check_km_version_ok(&mut serial)?;
-                    tracing::info!("Check KM version available at baud: {}", baud);
-                }
-                sleep(Duration::from_millis(200));
-                let mut serial = serialport::new(port, baud)
-                    .timeout(Duration::from_millis(100))
-                    .open()?;
-                serial.write_all(format!("km.buttons(1){CRLF}").as_bytes())?;
-                serial
-            }
-        };
-        tracing::info!("Mouse connected at baud rate: {:?}", serial.baud_rate());
-        let move_now = Self::probe_move_now(&mut serial);
-        if move_now {
-            tracing::info!("Firmware supports km.move_now");
+/// A planned flick, ready for [`SmoothMover::play`].
+#[derive(Debug, Clone)]
+pub struct Flick {
+    pub steps: Vec<MoveStep>,
+    /// Ask the device to put the counts in its next report untouched, where
+    /// it can; see [`crate::config::SmoothConfig::move_now`] and
+    /// [`crate::mouse::Caps::move_immediate`].
+    pub move_now: bool,
+    /// What this flick actually commits to, already cut by the ballistic gain.
+    /// This is deliberately *not* the delta that was asked for.
+    pub total: (i32, i32),
+    pub duration: Duration,
+}
+
+/// Carries the little state a sequence of flicks needs between frames: the
+/// sub-count remainder, and when the hand is allowed to start moving.
+pub struct SmoothMover {
+    cfg: SmoothConfig,
+    poll_hz: u32,
+    /// Counts per inch of physical travel, so a stroke's amplitude can be
+    /// turned into a hand speed and checked against something physical.
+    dpi: f64,
+    /// Counts asked for but not yet emitted. Under half a count unless a
+    /// report hit the per-report ceiling, in which case it holds the deferred
+    /// excess.
+    carry: (f64, f64),
+    /// When the flick already planned is expected to finish.
+    last_flick: Option<Instant>,
+    /// No flick before this instant; a fresh acquisition sets it.
+    ready_at: Option<Instant>,
+    /// When the auto click last fired, for the rate limit.
+    last_click: Option<Instant>,
+    /// Reused between flicks so the steady state does not allocate.
+    weights: Vec<f64>,
+}
+
+impl SmoothMover {
+    /// The `mover = "..."` name this movement is loaded under.
+    pub const NAME: &'static str = "smooth";
+
+    pub fn new(cfg: SmoothConfig, baud: u32, dpi: f64) -> Self {
+        let poll_hz = if cfg.poll_hz > 0 {
+            cfg.poll_hz
         } else {
-            tracing::info!(
-                "Firmware has no km.move_now; MOVE_SMOOTH_MOVE_NOW falls back to km.move"
-            );
-        }
-        Ok(Self {
-            serial: Mutex::new(serial),
-            pressed: Default::default(),
-            move_now: AtomicBool::new(move_now),
-        })
-    }
-
-    /// Does this firmware know `km.move_now`?
-    ///
-    /// A zero-count move is a no-op whichever way it goes, so the probe cannot
-    /// disturb the pointer. A known command is echoed back; an unknown one gets
-    /// no reply at all, which is what makes the distinction observable.
-    fn probe_move_now(serial: &mut Box<dyn SerialPort>) -> bool {
-        let _ = serial.clear(serialport::ClearBuffer::Input);
-        if serial.write_all(b"km.move_now(0,0)\r\n").is_err() {
-            return false;
-        }
-        // Button reports may already be streaming, so scan for the echo rather
-        // than expecting it to be the whole of the reply.
-        let deadline = Instant::now() + Duration::from_millis(250);
-        let mut seen = String::new();
-        let mut buffer = [0u8; 128];
-        while Instant::now() < deadline {
-            match serial.read(&mut buffer) {
-                Ok(0) => {}
-                Ok(n) => {
-                    seen.push_str(&String::from_utf8_lossy(&buffer[..n]));
-                    if seen.contains("move_now") {
-                        return true;
-                    }
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {}
-                Err(_) => return false,
-            }
-        }
-        false
-    }
-
-    fn check_km_version_ok(serial: &mut Box<dyn SerialPort>) -> Result<()> {
-        serial.clear(serialport::ClearBuffer::Input)?;
-        serial.clear(serialport::ClearBuffer::Output)?;
-        serial.write_all(VERIFY_COMMAND)?;
-        let mut verification_response = String::new();
-        let mut buffer = [0; 128];
-        loop {
-            match serial.read(&mut buffer) {
-                Ok(bytes_read) => {
-                    if bytes_read > 0 {
-                        verification_response
-                            .push_str(&String::from_utf8_lossy(&buffer[..bytes_read]));
-                        if verification_response.contains("km.MAKCU") {
-                            break;
-                        }
-                    }
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    tracing::error!(
-                        "Verification MAKCU change baud rate timed out. Check the connection."
-                    );
-                    bail!(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "Timeout during verification"
-                    ));
-                }
-                Err(e) => {
-                    bail!(e);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn cmd(&self, command: &str) -> Result<()> {
-        let mut serial = self.serial.lock().expect("Failed to lock serial port");
-        Ok(serial.write_all(format!("{command}{CRLF}").as_bytes())?)
-    }
-
-    pub fn move_shift(&self, dx: f64, dy: f64) -> Result<()> {
-        let dx = dx as i32;
-        let dy = dy as i32;
-        self.cmd(format!("km.move({dx},{dy})").as_str())
-    }
-
-    pub fn move_bezier(&self, dx: f64, dy: f64, random: &mut ThreadRng) -> Result<()> {
-        let (steps, ref_x, ref_y) = self.find_bezier(dx, dy, random);
-        self.cmd(format!("km.move({dx},{dy},{steps},{ref_x},{ref_y})").as_str())
-    }
-
-    /// Move toward `delta` (mouse counts) the way a hand does: plan a flick
-    /// with [`plan_flick`], then play it with [`Self::play_flick`].
-    ///
-    /// The counterpart of [`Self::move_bezier`], which hands the whole delta to
-    /// the firmware in one command. `reach_px` and `width_px` are the distance
-    /// to the target and its width in screen pixels; Fitts's law needs the
-    /// *visual* difficulty of the shot, which counts do not carry. Blocks for
-    /// the length of the flick.
-    pub fn move_smooth(
-        &self,
-        smooth: &mut SmoothAim,
-        delta: (f64, f64),
-        reach_px: f32,
-        width_px: f32,
-        random: &mut impl Rng,
-        keep_going: impl Fn() -> bool,
-    ) -> Result<()> {
-        let Some(flick) = plan_flick(smooth, delta, reach_px, width_px, random) else {
-            return Ok(());
+            poll_hz_for_baud(baud)
         };
-        // The count budget is what decides whether this still looks like a
-        // hand: below roughly one count per report the profile degenerates into
-        // isolated ticks.
-        tracing::debug!(
-            "[Smooth] {:.2} counts over {} reports in {:?} ({:.2}/report), \
-             reach {:.0} px, width {:.0} px",
-            delta.0.hypot(delta.1),
-            flick.steps.len(),
-            flick.duration,
-            delta.0.hypot(delta.1) / flick.steps.len() as f64,
-            reach_px,
-            width_px,
-        );
-        self.play_flick(&flick, &keep_going)
+        Self {
+            cfg,
+            poll_hz: poll_hz.clamp(POLL_HZ_CLAMP.0, POLL_HZ_CLAMP.1),
+            // A non-positive DPI would make every speed infinite; fall back to
+            // the value `mouse.dpi` defaults to rather than poisoning the plan.
+            dpi: if dpi.is_finite() && dpi > 0. {
+                dpi
+            } else {
+                FALLBACK_DPI
+            },
+            carry: (0., 0.),
+            last_flick: None,
+            ready_at: None,
+            last_click: None,
+            weights: Vec::new(),
+        }
     }
 
-    /// Play a flick planned by [`plan_flick`], one `km.move` per report
+    pub fn poll_hz(&self) -> u32 {
+        self.poll_hz
+    }
+
+    pub fn config(&self) -> &SmoothConfig {
+        &self.cfg
+    }
+
+    #[cfg(test)]
+    pub(crate) fn carry(&self) -> (f64, f64) {
+        self.carry
+    }
+}
+
+impl SmoothMover {
+    /// Play a flick planned by [`plan_flick`], one device report per
     /// deadline.
     ///
     /// Deadlines are absolute offsets from the first report, so a `sleep` that
@@ -237,15 +118,18 @@ impl MouseVirtual {
     /// `keep_going` is checked once per report, because the alternative is not
     /// re-reading the trigger for the length of the movement. A hand abandons a
     /// flick when the reason for it goes away, so this does too.
-    pub fn play_flick(&self, flick: &Flick, keep_going: impl Fn() -> bool) -> Result<()> {
-        // `km.move` is interpolated by V4.028+ firmware over 4-42 ms. Every
-        // report here is already placed on its own deadline, so that second
-        // layer would smear the profile and queue commands behind each other.
-        let verb = if flick.move_now && self.move_now.load(Ordering::Acquire) {
-            "km.move_now"
-        } else {
-            "km.move"
-        };
+    pub fn play(
+        &self,
+        mouse: &dyn MouseDevice,
+        flick: &Flick,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Result<()> {
+        // A plain move is interpolated by the firmware over several
+        // milliseconds. Every report here is already placed on its own
+        // deadline, so that second layer would smear the profile and queue
+        // commands behind each other — ask for the immediate form where the
+        // device has one.
+        let immediate = flick.move_now && mouse.caps().move_immediate;
         let start = Instant::now();
         let last = flick.steps.len().saturating_sub(1);
         let (mut dx, mut dy) = (0i64, 0i64);
@@ -268,355 +152,64 @@ impl MouseVirtual {
             // elsewhere. The deadline was still honoured, so the slow head and
             // the long tail of the profile keep their shape.
             if (dx, dy) != (0, 0) {
-                self.cmd(format!("{verb}({dx},{dy})").as_str())?;
+                if immediate {
+                    mouse.move_immediate(dx as i32, dy as i32)?;
+                } else {
+                    mouse.move_to(dx as i32, dy as i32)?;
+                }
                 dx = 0;
                 dy = 0;
             }
         }
         Ok(())
     }
+}
 
-    #[inline(always)]
-    pub(crate) fn find_bezier(&self, dx: f64, dy: f64, random: &mut ThreadRng) -> (i32, i32, i32) {
-        let pixel = (dx * dx + dy * dy).sqrt();
-        let lower = (pixel * 0.2) as i32;
-        let upper = (pixel * 0.55) as i32 + 1;
-        let steps = random.random_range(lower..=upper);
-        let ref_x = random.random_range(1..6);
-        let ref_y = random.random_range(1..6);
-        (steps, ref_x, ref_y)
+impl Mover for SmoothMover {
+    fn name(&self) -> &'static str {
+        Self::NAME
     }
 
-    pub fn listen_button_presses(self: Arc<Self>) {
-        let mut last_value = 0;
-        let mut buf = [0; 8];
-        loop {
-            // The port carries a 100 ms read timeout and an idle one is the
-            // normal case, so reading under the lock would hold it for the full
-            // timeout and stall every `km.move` queued behind it. A timed
-            // report profile cannot survive that, so ask first and only read
-            // when there is something to read.
-            let bytes_read = {
-                let mut serial = self.serial.lock().expect("Could not acquire serial lock");
-                match serial.bytes_to_read() {
-                    Ok(0) | Err(_) => {
-                        drop(serial);
-                        sleep(Duration::from_millis(1));
-                        continue;
-                    }
-                    _ => serial.read(&mut buf),
-                }
-            };
-            match bytes_read {
-                Ok(bytes_read) => {
-                    if bytes_read > 0 {
-                        buf[..bytes_read].iter().for_each(|v| {
-                            let v = *v;
-                            if v != 0x0A && v != 0x0D && v < 32 {
-                                let changed = last_value ^ v;
-                                if changed > 0 {
-                                    for i in 0..self.pressed.len() {
-                                        let m = 1 << i;
-                                        if changed & m > 0 {
-                                            self.pressed[i].store(v & m > 0, Ordering::Release);
-                                        }
-                                    }
-                                    last_value = v;
-                                }
-                            }
-                        });
-                    }
-                }
-                _ => {}
-            }
-            sleep(Duration::from_millis(1));
-        }
-    }
-
-    fn is_button_pressing(&self, button: usize) -> bool {
-        self.pressed[button].load(Ordering::Acquire)
-    }
-
-    fn handle_button_holding(
-        self: Arc<Self>,
-        button: usize,
-        hold_duration: Duration,
-        interval: Duration,
-        f: Box<dyn Fn() -> ()>,
-    ) {
-        loop {
-            if self.pressed[button].load(Ordering::Acquire) {
-                let time = Instant::now();
-                loop {
-                    sleep(interval);
-                    if self.pressed[button].load(Ordering::Acquire) {
-                        if time.elapsed() >= hold_duration {
-                            f();
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-            sleep(interval);
-        }
-    }
-
-    pub fn is_left_pressing(&self) -> bool {
-        self.is_button_pressing(0)
-    }
-
-    pub fn is_right_pressing(&self) -> bool {
-        self.is_button_pressing(1)
-    }
-
-    pub fn is_middle_pressing(&self) -> bool {
-        self.is_button_pressing(2)
-    }
-
-    pub fn is_side4_pressing(&self) -> bool {
-        self.is_button_pressing(3)
-    }
-
-    pub fn is_side5_pressing(&self) -> bool {
-        self.is_button_pressing(4)
-    }
-
-    pub fn handle_left_holding(
-        self: Arc<Self>,
-        hold_duration: Duration,
-        interval: Duration,
-        f: Box<dyn Fn() -> ()>,
-    ) {
-        self.handle_button_holding(0, hold_duration, interval, f);
-    }
-
-    pub fn handle_right_holding(
-        self: Arc<Self>,
-        hold_duration: Duration,
-        interval: Duration,
-        f: Box<dyn Fn() -> ()>,
-    ) {
-        self.handle_button_holding(1, hold_duration, interval, f);
-    }
-
-    pub fn handle_middle_holding(
-        self: Arc<Self>,
-        hold_duration: Duration,
-        interval: Duration,
-        f: Box<dyn Fn() -> ()>,
-    ) {
-        self.handle_button_holding(2, hold_duration, interval, f);
-    }
-
-    pub fn handle_side4_holding(
-        self: Arc<Self>,
-        hold_duration: Duration,
-        interval: Duration,
-        f: Box<dyn Fn() -> ()>,
-    ) {
-        self.handle_button_holding(3, hold_duration, interval, f);
-    }
-
-    pub fn handle_side5_holding(
-        self: Arc<Self>,
-        hold_duration: Duration,
-        interval: Duration,
-        f: Box<dyn Fn() -> ()>,
-    ) {
-        self.handle_button_holding(4, hold_duration, interval, f);
-    }
-
-    /// Lock physical mouse on X-axis direction
-    pub fn lock_mx(&self) -> Result<()> {
-        self.cmd("km.lock_mx(1)")
-    }
-
-    /// Unlock physical mouse on X-axis direction
-    pub fn unlock_mx(&self) -> Result<()> {
-        self.cmd("km.lock_mx(0)")
-    }
-
-    /// Lock physical mouse on Y-axis direction
-    pub fn lock_my(&self) -> Result<()> {
-        self.cmd("km.lock_my(1)")
-    }
-
-    /// Unlock physical mouse on Y-axis direction
-    pub fn unlock_my(&self) -> Result<()> {
-        self.cmd("km.lock_my(0)")
-    }
-
-    /// Press a button, hold it long enough to be seen, release it.
+    /// Move toward `aim.delta` (mouse counts) the way a hand does: plan a
+    /// flick with [`plan_flick`], then play it with [`SmoothMover::play`].
     ///
-    /// `km.left(1)` immediately followed by `km.left(0)` — which is what this
-    /// used to send, both in one write — does not click. The firmware emits HID
-    /// reports on a fixed cadence, so a press and release that both land inside
-    /// one report interval never appear on the wire at all; at 4 Mbaud the two
-    /// lines are tens of microseconds apart.
-    ///
-    /// MAKCU's own `km.click(button)` would time the hold in firmware, but this
-    /// firmware does not have it: it answers `km.click` with the same silence
-    /// it gives any unknown command, so the hold is timed here instead.
-    fn click_button(&self, button: &str, random: &mut impl Rng) -> Result<()> {
-        let hold = random.random_range(CLICK_HOLD_MS.0..=CLICK_HOLD_MS.1);
-        self.cmd(format!("km.{button}(1)").as_str())?;
-        sleep(Duration::from_millis(hold));
-        self.cmd(format!("km.{button}(0)").as_str())
-    }
-
-    pub fn click_left(&self, random: &mut impl Rng) -> Result<()> {
-        self.click_button("left", random)
-    }
-
-    pub fn click_right(&self, random: &mut impl Rng) -> Result<()> {
-        self.click_button("right", random)
-    }
-
-    pub fn batch(&self) -> BatchCommands<'_> {
-        BatchCommands::new(self)
-    }
-}
-
-pub struct BatchCommands<'a> {
-    mouse: &'a MouseVirtual,
-    buf: String,
-}
-
-impl<'a> BatchCommands<'a> {
-    pub fn new(mouse: &'a MouseVirtual) -> Self {
-        Self {
-            mouse,
-            buf: String::new(),
-        }
-    }
-
-    pub fn move_shift(mut self, dx: f64, dy: f64) -> Self {
-        let dx = dx as i32;
-        let dy = dy as i32;
-        self.buf
-            .push_str(format!("km.move({dx},{dy}){CRLF}").as_str());
-        self
-    }
-
-    pub fn move_bezier(mut self, dx: f64, dy: f64, random: &mut ThreadRng) -> Self {
-        let (steps, ref_x, ref_y) = self.mouse.find_bezier(dx, dy, random);
-        self.buf
-            .push_str(format!("km.move({dx},{dy},{steps},{ref_x},{ref_y}){CRLF}").as_str());
-        self
-    }
-
-    pub fn lock_mx(mut self) -> Self {
-        self.buf.push_str(format!("km.lock_mx(1){CRLF}").as_str());
-        self
-    }
-
-    pub fn unlock_mx(mut self) -> Self {
-        self.buf.push_str(format!("km.lock_mx(0){CRLF}").as_str());
-        self
-    }
-
-    pub fn lock_my(mut self) -> Self {
-        self.buf.push_str(format!("km.lock_my(1){CRLF}").as_str());
-        self
-    }
-
-    pub fn unlock_my(mut self) -> Self {
-        self.buf.push_str(format!("km.lock_my(0){CRLF}").as_str());
-        self
-    }
-
-    // No `click_*` here on purpose. A batch is one write, so a press and its
-    // release would leave in the same breath and the click would never reach
-    // the wire — see `MouseVirtual::click_button`. A click needs a hold, and a
-    // hold needs the caller to wait.
-
-    pub fn run(&self) -> Result<()> {
-        self.mouse.cmd(self.buf.as_str())
-    }
-}
-
-/// The standard normal's 99th percentile, used to pin the lognormal tail to
-/// the end of the movement.
-const Z99: f64 = 2.3263478740408408;
-
-/// One mouse report: the integer counts that go on the wire at `at`, measured
-/// from the first report of the flick.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MoveStep {
-    pub dx: i32,
-    pub dy: i32,
-    pub at: Duration,
-}
-
-/// A planned flick, ready for [`MouseVirtual::play_flick`].
-#[derive(Debug, Clone)]
-pub struct Flick {
-    pub steps: Vec<MoveStep>,
-    /// Emit `km.move_now` rather than `km.move`; see
-    /// [`crate::config::SmoothConfig::move_now`].
-    pub move_now: bool,
-    /// What this flick actually commits to, already cut by the ballistic gain.
-    /// This is deliberately *not* the delta that was asked for.
-    pub total: (i32, i32),
-    pub duration: Duration,
-}
-
-/// Carries the little state a sequence of flicks needs between frames: the
-/// sub-count remainder, and when the hand is allowed to start moving.
-pub struct SmoothAim {
-    cfg: SmoothConfig,
-    poll_hz: u32,
-    /// Counts per inch of physical travel, so a stroke's amplitude can be
-    /// turned into a hand speed and checked against something physical.
-    dpi: f64,
-    /// Counts asked for but not yet emitted. Under half a count unless a
-    /// report hit the per-report ceiling, in which case it holds the deferred
-    /// excess.
-    carry: (f64, f64),
-    /// When the flick already planned is expected to finish.
-    last_flick: Option<Instant>,
-    /// No flick before this instant; a fresh acquisition sets it.
-    ready_at: Option<Instant>,
-    /// When the auto click last fired, for the rate limit.
-    last_click: Option<Instant>,
-    /// Reused between flicks so the steady state does not allocate.
-    weights: Vec<f64>,
-}
-
-impl SmoothAim {
-    pub fn new(cfg: SmoothConfig, baud: u32, dpi: f64) -> Self {
-        let poll_hz = if cfg.poll_hz > 0 {
-            cfg.poll_hz
-        } else {
-            poll_hz_for_baud(baud)
+    /// `aim.reach_px` and `aim.width_px` are the distance to the target and
+    /// its width in screen pixels; Fitts's law needs the *visual* difficulty
+    /// of the shot, which counts do not carry. Blocks for the length of the
+    /// flick.
+    fn apply(
+        &mut self,
+        mouse: &dyn MouseDevice,
+        aim: Aim,
+        mut random: &mut dyn RngCore,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Result<()> {
+        let Some(flick) = plan_flick(self, aim.delta, aim.reach_px, aim.width_px, &mut random)
+        else {
+            return Ok(());
         };
-        Self {
-            cfg,
-            poll_hz: poll_hz.clamp(1, 8000),
-            // A non-positive DPI would make every speed infinite; fall back to
-            // the value MOUSE_DPI defaults to rather than poisoning the plan.
-            dpi: if dpi.is_finite() && dpi > 0. { dpi } else { 1000. },
-            carry: (0., 0.),
-            last_flick: None,
-            ready_at: None,
-            last_click: None,
-            weights: Vec::new(),
-        }
+        // The count budget is what decides whether this still looks like a
+        // hand: below roughly one count per report the profile degenerates into
+        // isolated ticks.
+        tracing::debug!(
+            "[Smooth] {:.2} counts over {} reports in {:?} ({:.2}/report), \
+             reach {:.0} px, width {:.0} px",
+            aim.delta.0.hypot(aim.delta.1),
+            flick.steps.len(),
+            flick.duration,
+            aim.delta.0.hypot(aim.delta.1) / flick.steps.len() as f64,
+            aim.reach_px,
+            aim.width_px,
+        );
+        self.play(mouse, &flick, keep_going)
     }
 
-    pub fn poll_hz(&self) -> u32 {
-        self.poll_hz
+    fn after_move(&mut self, mut random: &mut dyn RngCore) -> ClickPlan {
+        plan_click(self, &mut random)
     }
 
-    pub fn config(&self) -> &SmoothConfig {
-        &self.cfg
-    }
-
-    #[cfg(test)]
-    pub(crate) fn carry(&self) -> (f64, f64) {
-        self.carry
+    fn clicked(&mut self, at: Instant) {
+        self.last_click = Some(at);
     }
 }
 
@@ -683,155 +276,13 @@ fn render_weights(out: &mut Vec<f64>, mt_ms: f64, peak_frac: f64, n: usize) {
     }
 }
 
-/// What the aim loop asks the mouse thread to do.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum MoveRequest {
-    /// Play the human-flick model, and the auto click behind it if configured.
-    Smooth {
-        /// Index into the configured profiles, which picks the `SmoothAim`
-        /// whose tuning and carried state this flick belongs to.
-        profile: usize,
-        delta: (f64, f64),
-        /// Reach and target width in *screen* pixels; Fitts wants the visual
-        /// difficulty of the shot, which counts do not carry.
-        reach_px: f32,
-        width_px: f32,
-    },
-    /// Hand the whole delta to the firmware in one command.
-    Bezier { delta: (f64, f64) },
-}
-
-/// Drain `queue` and drive the mouse, forever.
-///
-/// The aim loop used to call `move_smooth` directly, which blocks for the
-/// length of the flick and, with the auto click on, for the click behind it. A
-/// frame arriving mid-flick therefore went unlooked-at until the mouse had
-/// finished — up to a couple of hundred milliseconds of not detecting anything.
-///
-/// Moving off-thread costs no ordering. Every command still leaves from this
-/// one thread in the order it pops them, and a request's click still follows
-/// its own move because one iteration does both, in sequence. What it does
-/// change is that the queue holds a single request which the aim loop
-/// overwrites, so the worker always picks up the newest aim rather than
-/// working through a backlog of places the target used to be.
-pub fn handle_mouse(
-    mouse: Arc<MouseVirtual>,
-    queue: Arc<ArrayQueue<MoveRequest>>,
-    mut smooth: Vec<SmoothAim>,
-    keep_going: impl Fn() -> bool,
-) {
-    let mut random = rand::rng();
-    loop {
-        let Some(request) = queue.pop() else {
-            sleep(IDLE_POLL);
-            continue;
-        };
-        // Only the human-flick path clicks; a bezier move is the plain path and
-        // was never part of this.
-        let Some(profile) = play_request(&mouse, &mut smooth, &mut random, &keep_going, request)
-        else {
-            continue;
-        };
-
-        let until = match plan_click(&smooth[profile], &mut random) {
-            ClickPlan::None => continue,
-            // Hold still: whatever the flick got wrong is what the shot carries.
-            ClickPlan::Miss(wait) => {
-                tracing::debug!("[Smooth] auto click after {wait:?}, holding still (miss)");
-                sleep(wait);
-                None
-            }
-            // Keep taking aim: the corrections still arriving get played inside
-            // the wait, so the crosshair is on target by the time it fires.
-            ClickPlan::Settle(wait) => {
-                tracing::debug!("[Smooth] auto click after {wait:?}, still tracking (hit)");
-                Some(Instant::now() + wait)
-            }
-        };
-        if let Some(deadline) = until {
-            while Instant::now() < deadline {
-                match queue.pop() {
-                    Some(request) => {
-                        play_request(&mouse, &mut smooth, &mut random, &keep_going, request);
-                    }
-                    None => sleep(IDLE_POLL),
-                }
-            }
-        }
-
-        // Re-read the trigger: the wait is long enough to be let go inside, and
-        // firing after that is a shot nobody asked for.
-        if !keep_going() {
-            continue;
-        }
-        // Stamped at the press, not after the release: the rate limit is a gap
-        // between clicks and `click_left` holds the button for tens of
-        // milliseconds, which would otherwise be added to every gap.
-        let pressed_at = Instant::now();
-        match mouse.click_left(&mut random) {
-            Ok(()) => smooth[profile].last_click = Some(pressed_at),
-            Err(e) => tracing::error!("[Mouse] {}", e),
-        }
-    }
-}
-
-/// Play one request. A failed command is one lost aim, not a reason to stop
-/// aiming: the next frame plans afresh from wherever the crosshair actually is.
-fn play_request<F: Fn() -> bool>(
-    mouse: &MouseVirtual,
-    smooth: &mut [SmoothAim],
-    random: &mut rand::rngs::ThreadRng,
-    keep_going: &F,
-    request: MoveRequest,
-) -> Option<usize> {
-    let (result, played) = match request {
-        MoveRequest::Smooth {
-            profile,
-            delta,
-            reach_px,
-            width_px,
-        } => {
-            let Some(state) = smooth.get_mut(profile) else {
-                tracing::error!("[Mouse] request names profile {profile}, which is not configured");
-                return None;
-            };
-            (
-                mouse.move_smooth(state, delta, reach_px, width_px, random, keep_going),
-                Some(profile),
-            )
-        }
-        MoveRequest::Bezier { delta } => (mouse.move_bezier(delta.0, delta.1, random), None),
-    };
-    if let Err(e) = result {
-        tracing::error!("[Mouse] {}", e);
-    }
-    played
-}
-
-/// What the auto click should do once a flick has been played.
-///
-/// Both outcomes wait out the same delay; the difference is what the mouse
-/// does during it, which is what decides whether the shot lands.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ClickPlan {
-    /// Do not click.
-    None,
-    /// Hold still for this long, then fire. The crosshair stays where the
-    /// flick left it, so the shot carries the whole ballistic error — on a long
-    /// flick that is 12-20 screen pixels off a ~20 pixel target, and it misses.
-    Miss(Duration),
-    /// Keep taking aim for this long, then fire. The corrections land inside
-    /// the wait, so the shot is on target.
-    Settle(Duration),
-}
-
 /// Decide what happens after a flick: nothing, a miss, or a hit.
 ///
 /// Lives here rather than in `move_smooth` because settling means playing the
 /// corrections that are still arriving, and only the worker holds the queue
 /// they arrive on. Keeping it out of `move_smooth` also stops those correction
 /// flicks from each planning a click of their own.
-pub fn plan_click(state: &SmoothAim, random: &mut impl Rng) -> ClickPlan {
+pub fn plan_click(state: &SmoothMover, random: &mut impl Rng) -> ClickPlan {
     let cfg = state.cfg;
     if !cfg.auto_click {
         return ClickPlan::None;
@@ -913,8 +364,8 @@ struct Tremor {
 
 impl Tremor {
     fn new(cfg: &SmoothConfig, mt_ms: f64, random: &mut impl Rng) -> Self {
-        let f1 = uniform(random, 8., 12.);
-        let f2 = f1 * uniform(random, 1.4, 1.9);
+        let f1 = uniform(random, TREMOR_HZ.0, TREMOR_HZ.1);
+        let f2 = f1 * uniform(random, TREMOR_HARMONIC.0, TREMOR_HARMONIC.1);
         // Progress runs 0..1 over the stroke, so a frequency in hertz turns
         // into this much phase across it.
         let seconds = mt_ms / 1000.;
@@ -933,7 +384,7 @@ impl Tremor {
         }
         self.amp
             * (PI * u).sin()
-            * ((self.w1 * u + self.p1).sin() + 0.5 * (self.w2 * u + self.p2).sin())
+            * ((self.w1 * u + self.p1).sin() + TREMOR_HARMONIC_GAIN * (self.w2 * u + self.p2).sin())
     }
 }
 
@@ -950,7 +401,7 @@ impl Tremor {
 /// correction visually guided rather than dead reckoning against a target that
 /// has since moved.
 pub fn plan_flick(
-    state: &mut SmoothAim,
+    state: &mut SmoothMover,
     delta: (f64, f64),
     d_px: f32,
     w_px: f32,
@@ -962,7 +413,7 @@ pub fn plan_flick(
 /// [`plan_flick`] with the clock injected, so the reaction window can be
 /// tested without sleeping.
 pub fn plan_flick_at(
-    state: &mut SmoothAim,
+    state: &mut SmoothMover,
     delta: (f64, f64),
     d_px: f32,
     w_px: f32,
@@ -1007,9 +458,11 @@ pub fn plan_flick_at(
     // minority that do overshoot are what put a visible direction reversal in
     // the next correction.
     let gain = if random.random::<f64>() < cfg.overshoot_p {
-        (1.06 + 0.04 * gauss(random).clamp(-3., 3.)).clamp(1., 1.25)
+        (OVERSHOOT_GAIN.0 + OVERSHOOT_GAIN.1 * gauss(random).clamp(-GAUSS_CLAMP, GAUSS_CLAMP))
+            .clamp(OVERSHOOT_CLAMP.0, OVERSHOOT_CLAMP.1)
     } else {
-        (cfg.gain + cfg.gain_sd * gauss(random).clamp(-3., 3.)).clamp(0.05, 1.05)
+        (cfg.gain + cfg.gain_sd * gauss(random).clamp(-GAUSS_CLAMP, GAUSS_CLAMP))
+            .clamp(GAIN_CLAMP.0, GAIN_CLAMP.1)
     };
 
     let target = (
@@ -1024,7 +477,7 @@ pub fn plan_flick_at(
     let mt = fitts_duration_ms(d_px as f64, w_px as f64, cfg.fitts_a_ms, cfg.fitts_b_ms);
     // Multiplicative jitter: it cannot produce a negative time, and it keeps
     // the spread proportional the way human variability is.
-    let mt = mt * (cfg.mt_jitter * gauss(random).clamp(-3., 3.)).exp();
+    let mt = mt * (cfg.mt_jitter * gauss(random).clamp(-GAUSS_CLAMP, GAUSS_CLAMP)).exp();
     let mt = mt.clamp(
         cfg.min_ms.min(cfg.max_ms).max(1.),
         cfg.min_ms.max(cfg.max_ms).max(1.),
@@ -1049,7 +502,7 @@ pub fn plan_flick_at(
     // are both ceilings, and whichever binds is the honest one.
     let by_time = mt * poll_hz as f64 / 1000.;
     let by_counts = amp / cfg.counts_per_report.max(0.05);
-    let n = (by_time.min(by_counts).round() as i64).clamp(2, 512) as usize;
+    let n = (by_time.min(by_counts).round() as i64).clamp(REPORTS.0, REPORTS.1) as usize;
 
     // Reports are spread across the stroke rather than packed at the poll rate.
     // Packing them would make the duration the report count over the poll rate,
@@ -1057,7 +510,7 @@ pub fn plan_flick_at(
     // that is the machine tell this whole model exists to avoid. Spreading
     // keeps the duration Fitts-governed and simply reports less often, which is
     // what a real mouse does when it is moving slowly anyway: the reports it
-    // sends in between carry no motion, and `play_flick` already omits those.
+    // sends in between carry no motion, and `SmoothMover::play` already omits those.
     let period = (mt / n as f64).max(1000. / poll_hz as f64);
     let mt_eff = period * n as f64;
 
@@ -1112,7 +565,7 @@ pub fn plan_flick_at(
             // where the hand is slow. It is anisotropic, because people vary
             // more along the direction of travel than across it.
             let m = weights[k] * amp;
-            let across = 0.6 * cfg.noise * m * gauss(random);
+            let across = NOISE_ACROSS * cfg.noise * m * gauss(random);
             let forward = cfg.noise * m * gauss(random);
             (
                 bow * (PI * u.powf(kappa)).sin() + tremor.at(u) + across,
@@ -1164,7 +617,7 @@ mod tests {
 
     /// One flick from a fresh hand, so the sub-count carry starts at zero.
     fn plan(cfg: SmoothConfig, delta: (f64, f64), d_px: f32, w_px: f32, seed: u64) -> Flick {
-        let mut state = SmoothAim::new(cfg, 2_000_000, 1000.);
+        let mut state = SmoothMover::new(cfg, 2_000_000, 1000.);
         let mut random = StdRng::seed_from_u64(seed);
         plan_flick(&mut state, delta, d_px, w_px, &mut random).expect("a non-zero delta flicks")
     }
@@ -1191,7 +644,7 @@ mod tests {
         c.gain_sd = 0.;
         c.overshoot_p = 0.;
         c.gap_ms = u64::MAX; // one continuous engagement, never stale
-        let mut state = SmoothAim::new(c, 2_000_000, 1000.);
+        let mut state = SmoothMover::new(c, 2_000_000, 1000.);
         let mut random = StdRng::seed_from_u64(7);
         let mut total = 0i64;
         for _ in 0..50 {
@@ -1205,7 +658,7 @@ mod tests {
     fn the_leftover_fraction_never_reaches_a_whole_count() {
         let mut c = cfg();
         c.gap_ms = u64::MAX;
-        let mut state = SmoothAim::new(c, 2_000_000, 1000.);
+        let mut state = SmoothMover::new(c, 2_000_000, 1000.);
         let mut random = StdRng::seed_from_u64(11);
         for step in 0..200 {
             let d = (step % 17) as f64 * 3.5 - 20.;
@@ -1276,7 +729,7 @@ mod tests {
         // reach * 96/1000 counts. The whole 192 px region is under 13 of them.
         for reach_px in [20.0f64, 40., 60., 96., 135.] {
             let counts = reach_px * 96. / 1000.;
-            let mut state = SmoothAim::new(c, 4_000_000, 1000.);
+            let mut state = SmoothMover::new(c, 4_000_000, 1000.);
             let mut random = StdRng::seed_from_u64(42);
             let f = plan_flick(&mut state, (counts, 0.), reach_px as f32, 20., &mut random)
                 .expect("a non-zero delta flicks");
@@ -1439,7 +892,7 @@ mod tests {
     /// with it, and a NaN delta is reachable from a misconfigured GAME_SENS.
     #[test]
     fn a_zero_delta_asks_for_no_movement_at_all() {
-        let mut state = SmoothAim::new(cfg(), 2_000_000, 1000.);
+        let mut state = SmoothMover::new(cfg(), 2_000_000, 1000.);
         let mut random = StdRng::seed_from_u64(1);
         for delta in [
             (0., 0.),
@@ -1478,7 +931,7 @@ mod tests {
             ..cfg()
         };
         for amp in [1e-9, 0.4, 1., 1e6] {
-            let mut state = SmoothAim::new(collapsed, 115_200, 1000.);
+            let mut state = SmoothMover::new(collapsed, 115_200, 1000.);
             let t = Instant::now();
             let delta = (amp, amp);
             assert!(
@@ -1505,7 +958,7 @@ mod tests {
             max_counts: 0,
             ..cfg()
         };
-        let mut state = SmoothAim::new(inverted, 115_200, 1000.);
+        let mut state = SmoothMover::new(inverted, 115_200, 1000.);
         let t = Instant::now();
         let _ = plan_flick_at(&mut state, (50., 50.), 70., 24., &mut random, t);
         let late = t + Duration::from_millis(500);
@@ -1532,7 +985,7 @@ mod tests {
             gain_sd: 0.,
             ..cfg()
         };
-        let mut state = SmoothAim::new(c, 2_000_000, 1000.);
+        let mut state = SmoothMover::new(c, 2_000_000, 1000.);
         let mut random = StdRng::seed_from_u64(4);
         let f = plan_flick(&mut state, (400., -300.), 500., 24., &mut random).expect("flicks");
         let (cx, cy) = state.carry();
@@ -1559,7 +1012,7 @@ mod tests {
     #[test]
     fn report_deadlines_are_uniform_and_never_faster_than_the_poll_rate() {
         for baud in [115_200u32, 2_000_000] {
-            let mut state = SmoothAim::new(cfg(), baud, 1000.);
+            let mut state = SmoothMover::new(cfg(), baud, 1000.);
             let hz = state.poll_hz();
             let mut random = StdRng::seed_from_u64(6);
             let f = plan_flick(&mut state, (240., 80.), 253., 24., &mut random).expect("flicks");
@@ -1585,7 +1038,7 @@ mod tests {
             react_max_ms: 260,
             ..cfg()
         };
-        let mut state = SmoothAim::new(c, 2_000_000, 1000.);
+        let mut state = SmoothMover::new(c, 2_000_000, 1000.);
         let mut random = StdRng::seed_from_u64(8);
         let t = Instant::now();
         let d = (200., 0.);
@@ -1600,7 +1053,7 @@ mod tests {
     /// spending it on the next one would pull the first flick off course.
     #[test]
     fn a_long_gap_throws_away_the_leftover_from_the_old_target() {
-        let mut state = SmoothAim::new(cfg(), 2_000_000, 1000.);
+        let mut state = SmoothMover::new(cfg(), 2_000_000, 1000.);
         let mut random = StdRng::seed_from_u64(10);
         let t = Instant::now();
         plan_flick_at(&mut state, (0.4, 0.4), 4., 24., &mut random, t).expect("flicks");
@@ -1619,7 +1072,7 @@ mod tests {
     fn the_reaction_window_is_a_no_op_when_it_is_switched_off() {
         let c = cfg();
         assert_eq!((c.react_min_ms, c.react_max_ms), (0, 0));
-        let mut state = SmoothAim::new(c, 2_000_000, 1000.);
+        let mut state = SmoothMover::new(c, 2_000_000, 1000.);
         let mut random = StdRng::seed_from_u64(12);
         let t = Instant::now();
         assert!(plan_flick_at(&mut state, (200., 0.), 200., 24., &mut random, t).is_some());
@@ -1631,7 +1084,7 @@ mod tests {
     fn over_many_flicks_the_rounding_residual_has_no_systematic_bias() {
         let mut c = cfg();
         c.gap_ms = u64::MAX;
-        let mut state = SmoothAim::new(c, 2_000_000, 1000.);
+        let mut state = SmoothMover::new(c, 2_000_000, 1000.);
         let mut random = StdRng::seed_from_u64(21);
         let (mut sx, mut sy) = (0f64, 0f64);
         let n = 2000;
@@ -1715,7 +1168,7 @@ mod tests {
             let mut last = Duration::ZERO;
             for reach in [20.0f64, 60., 135.] {
                 let counts = reach * cpp;
-                let mut st = SmoothAim::new(c, 4_000_000, DPI);
+                let mut st = SmoothMover::new(c, 4_000_000, DPI);
                 let mut r = StdRng::seed_from_u64(42);
                 let f = plan_flick(&mut st, (counts, 0.), reach as f32, 20., &mut r)
                     .expect("a non-zero delta flicks");
@@ -1763,7 +1216,7 @@ mod tests {
         let mut at = |dpi: f64| {
             // A tenth of an inch of hand travel, whatever that is in counts.
             let counts = 0.1 * dpi;
-            let mut st = SmoothAim::new(c, 4_000_000, dpi);
+            let mut st = SmoothMover::new(c, 4_000_000, dpi);
             let mut r = StdRng::seed_from_u64(3);
             plan_flick(&mut st, (counts, 0.), 135., 20., &mut r)
                 .expect("flicks")
@@ -1927,9 +1380,9 @@ mod tests {
     fn a_miss_probability_of_zero_never_misses_and_one_always_does() {
         let mut r = StdRng::seed_from_u64(5);
         for _ in 0..500 {
-            let never = SmoothAim::new(click_cfg(0.), 4_000_000, 1000.);
+            let never = SmoothMover::new(click_cfg(0.), 4_000_000, 1000.);
             assert!(matches!(plan_click(&never, &mut r), ClickPlan::Settle(_)));
-            let always = SmoothAim::new(click_cfg(1.), 4_000_000, 1000.);
+            let always = SmoothMover::new(click_cfg(1.), 4_000_000, 1000.);
             assert!(matches!(plan_click(&always, &mut r), ClickPlan::Miss(_)));
         }
     }
@@ -1941,7 +1394,7 @@ mod tests {
             let n = 4000;
             let misses = (0..n)
                 .filter(|_| {
-                    let st = SmoothAim::new(click_cfg(p), 4_000_000, 1000.);
+                    let st = SmoothMover::new(click_cfg(p), 4_000_000, 1000.);
                     matches!(plan_click(&st, &mut r), ClickPlan::Miss(_))
                 })
                 .count();
@@ -1958,7 +1411,7 @@ mod tests {
         let mut r = StdRng::seed_from_u64(13);
         for _ in 0..1000 {
             for p in [0.0f64, 1.0] {
-                let st = SmoothAim::new(click_cfg(p), 4_000_000, 1000.);
+                let st = SmoothMover::new(click_cfg(p), 4_000_000, 1000.);
                 let wait = match plan_click(&st, &mut r) {
                     ClickPlan::Miss(w) | ClickPlan::Settle(w) => w,
                     ClickPlan::None => unreachable!("auto_click is on with no rate limit"),
@@ -1974,7 +1427,7 @@ mod tests {
     fn a_miss_needs_the_auto_click_switched_on_at_all() {
         assert_eq!(cfg().auto_click_miss_p, 0.0);
         let mut r = StdRng::seed_from_u64(17);
-        let off = SmoothAim::new(
+        let off = SmoothMover::new(
             SmoothConfig {
                 auto_click: false,
                 auto_click_miss_p: 1.0,
@@ -1991,9 +1444,9 @@ mod tests {
     fn an_out_of_range_miss_probability_is_clamped() {
         let mut r = StdRng::seed_from_u64(19);
         for _ in 0..200 {
-            let high = SmoothAim::new(click_cfg(9.5), 4_000_000, 1000.);
+            let high = SmoothMover::new(click_cfg(9.5), 4_000_000, 1000.);
             assert!(matches!(plan_click(&high, &mut r), ClickPlan::Miss(_)));
-            let low = SmoothAim::new(click_cfg(-3.), 4_000_000, 1000.);
+            let low = SmoothMover::new(click_cfg(-3.), 4_000_000, 1000.);
             assert!(matches!(plan_click(&low, &mut r), ClickPlan::Settle(_)));
         }
     }
@@ -2003,7 +1456,7 @@ mod tests {
     #[test]
     fn the_rate_limit_still_applies_to_a_miss() {
         let mut r = StdRng::seed_from_u64(23);
-        let mut st = SmoothAim::new(
+        let mut st = SmoothMover::new(
             SmoothConfig {
                 auto_click_rate_limit_ms: 60_000,
                 ..click_cfg(1.0)

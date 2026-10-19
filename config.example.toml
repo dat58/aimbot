@@ -38,15 +38,21 @@ openvino_cache_dir = "assets"
 openvino_device_type = "CPU"
 intra_threads = 1
 
-makcu_port = "/dev/ttyACM0"
-makcu_baud = 4000000
-mouse_dpi = 1000.0
 game_sens = 0.38
 
 default_aim_mode = 4
 
 esp_button_1_profile = 0
 esp_button_2_profile = 1
+
+[mouse]
+# Name picks the backend that gets loaded.
+device = "makcu"
+port = "/dev/ttyACM0"
+baud = 4000000
+# Read the physical mouse's buttons back off the link.
+listen = false
+dpi = 1000.0
 
 [[profile]]
 name = "tracking"

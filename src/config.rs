@@ -79,10 +79,10 @@ pub fn poll_hz_for_baud(baud: u32) -> u32 {
 }
 
 /// Numeric tuning for the human-flick model behind
-/// [`crate::mouse::MouseVirtual::move_smooth`].
+/// [`crate::mouse::mover::smooth::SmoothMover`].
 ///
 /// Whether that model is used at all is not decided here: each [`Profile`]
-/// picks its own [`Mover`].
+/// picks its own [`MoverKind`].
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SmoothConfig {
@@ -289,21 +289,63 @@ impl Default for SmoothConfig {
     }
 }
 
+/// Which movement a profile is played with. The name here selects the struct
+/// that gets loaded; see [`crate::mouse::mover::build`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Mover {
+pub enum MoverKind {
     #[default]
     Smooth,
     Bezier,
 }
 
-impl std::fmt::Display for Mover {
+impl std::fmt::Display for MoverKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Mover::Smooth => write!(f, "smooth"),
-            Mover::Bezier => write!(f, "bezier"),
+            MoverKind::Smooth => write!(f, "smooth"),
+            MoverKind::Bezier => write!(f, "bezier"),
         }
     }
+}
+
+/// Which device actually holds the mouse. The name here selects the struct
+/// that gets loaded; see [`crate::mouse::connect`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceKind {
+    #[default]
+    Makcu,
+}
+
+impl std::fmt::Display for DeviceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeviceKind::Makcu => write!(f, "makcu"),
+        }
+    }
+}
+
+/// Everything about the link to the physical mouse, which is a fact about the
+/// hardware rather than about the game. Kept in its own table so a device that
+/// is not a MAKCU does not have to read keys named after one.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MouseConfig {
+    #[serde(default)]
+    pub device: DeviceKind,
+    pub port: String,
+    #[serde(default = "default_mouse_baud")]
+    pub baud: u32,
+    /// Read the physical mouse's own button reports back off the link, which
+    /// is what makes [`crate::mouse::MouseDevice::is_pressing`] answer with
+    /// anything.
+    #[serde(default)]
+    pub listen: bool,
+    /// Counts per inch of physical travel. Not a tuning knob: it is what the
+    /// mouse is set to, and the movement model needs it to turn an amplitude
+    /// into a hand speed.
+    #[serde(default = "default_mouse_dpi")]
+    pub dpi: f64,
 }
 
 /// One set of aim and movement tuning, selected by which ESP button is held.
@@ -316,7 +358,7 @@ pub struct Profile {
     pub fov: f32,
     pub scale_min_zone: f32,
     #[serde(default)]
-    pub mover: Mover,
+    pub mover: MoverKind,
     /// Pins the aim mode for this profile. Absent follows the runtime
     /// [`crate::aim::AimMode`], which the event listener can change.
     #[serde(default)]
@@ -382,7 +424,7 @@ fn default_openvino_device_type() -> String {
 fn default_intra_threads() -> usize {
     1
 }
-fn default_makcu_baud() -> u32 {
+fn default_mouse_baud() -> u32 {
     115_200
 }
 fn default_mouse_dpi() -> f64 {
@@ -514,13 +556,7 @@ pub struct Config {
     #[serde(default = "default_intra_threads")]
     pub intra_threads: usize,
 
-    pub makcu_port: String,
-    #[serde(default = "default_makcu_baud")]
-    pub makcu_baud: u32,
-    #[serde(default)]
-    pub makcu_listen: bool,
-    #[serde(default = "default_mouse_dpi")]
-    pub mouse_dpi: f64,
+    pub mouse: MouseConfig,
     #[serde(default = "default_game_sens")]
     pub game_sens: f64,
 
@@ -581,8 +617,8 @@ impl Config {
         if !self.game_sens.is_finite() || self.game_sens <= 0. {
             bail!("game_sens must be greater than zero");
         }
-        if !self.mouse_dpi.is_finite() || self.mouse_dpi <= 0. {
-            bail!("mouse_dpi must be greater than zero");
+        if !self.mouse.dpi.is_finite() || self.mouse.dpi <= 0. {
+            bail!("mouse.dpi must be greater than zero");
         }
 
         if self.profiles.is_empty() {
@@ -628,6 +664,9 @@ impl Config {
 mod tests {
     use super::*;
 
+    /// `[mouse]` is emitted *after* `extra` on purpose: a TOML header swallows
+    /// every key that follows it, so a table in the middle would capture
+    /// whatever root keys a caller appended.
     fn with(extra: &str) -> String {
         format!(
             "source_stream = \"elgato://\"\n\
@@ -636,10 +675,11 @@ mod tests {
              model_conf_body = 0.5\n\
              model_conf_head = 0.5\n\
              model_iou = 0.5\n\
-             makcu_port = \"/dev/ttyACM0\"\n\
              esp_button_1_profile = 0\n\
              esp_button_2_profile = 1\n\
-             {extra}\n"
+             {extra}\n\
+             \n[mouse]\n\
+             port = \"/dev/ttyACM0\"\n"
         )
     }
 
@@ -668,13 +708,13 @@ aim_mode = "horizon"
         assert_eq!(tracking.name, "tracking");
         assert_eq!(tracking.fov, 35.);
         assert_eq!(tracking.scale_min_zone, 0.5);
-        assert_eq!(tracking.mover, Mover::Smooth);
+        assert_eq!(tracking.mover, MoverKind::Smooth);
         assert_eq!(tracking.aim_mode, None);
         assert_eq!(tracking.smooth.gain, 0.75);
         assert!(tracking.smooth.auto_click);
 
         let flick = config.profile(config.esp_button_2_profile);
-        assert_eq!(flick.mover, Mover::Bezier);
+        assert_eq!(flick.mover, MoverKind::Bezier);
         assert_eq!(flick.aim_mode, Some(Mode::Horizon));
         assert_eq!(flick.smooth.gain, SmoothConfig::default().gain);
     }
@@ -704,7 +744,7 @@ aim_mode = "horizon"
                         [[profile]]\nname = \"b\"\nscale_min_zone = 0.5\n");
         let config = Config::parse(&src).unwrap();
         assert_eq!(config.profiles[0].smooth, SmoothConfig::default());
-        assert_eq!(config.profiles[0].mover, Mover::Smooth);
+        assert_eq!(config.profiles[0].mover, MoverKind::Smooth);
         assert_eq!(config.profiles[0].aim_mode, None);
     }
 
@@ -740,11 +780,28 @@ aim_mode = "horizon"
 
     #[test]
     fn a_zero_sensitivity_is_refused_rather_than_freezing_the_aim() {
-        for (key, value) in [("game_sens", "0.0"), ("mouse_dpi", "0.0")] {
-            let src = with(&format!("{key} = {value}\n{TWO_PROFILES}"));
-            let err = Config::parse(&src).unwrap_err().to_string();
-            assert!(err.contains(key), "{err}");
-        }
+        let src = with(&format!("game_sens = 0.0\n{TWO_PROFILES}"));
+        let err = Config::parse(&src).unwrap_err().to_string();
+        assert!(err.contains("game_sens"), "{err}");
+
+        let src = with(TWO_PROFILES).replace("[mouse]", "[mouse]\ndpi = 0.0");
+        let err = Config::parse(&src).unwrap_err().to_string();
+        assert!(err.contains("dpi"), "{err}");
+    }
+
+    /// The device name picks which struct is loaded, so a name nothing answers
+    /// to has to fail at load rather than at the first move.
+    #[test]
+    fn an_unknown_mouse_device_is_refused() {
+        let src = with(TWO_PROFILES).replace("[mouse]", "[mouse]\ndevice = \"razer\"");
+        assert!(Config::parse(&src).is_err(), "an unknown device was accepted");
+
+        let src = with(TWO_PROFILES).replace("[mouse]", "[mouse]\ndevice = \"makcu\"");
+        let config = Config::parse(&src).unwrap();
+        assert_eq!(config.mouse.device, DeviceKind::Makcu);
+        assert_eq!(config.mouse.baud, 115_200);
+        assert_eq!(config.mouse.dpi, 1000.);
+        assert!(!config.mouse.listen);
     }
 
     /// The `.env` this replaces had exactly this bug: it set `SCALE_MIN_ZONE`

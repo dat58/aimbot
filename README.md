@@ -10,12 +10,15 @@ Two machines:
   and mouse presses to PC2's event listener. The keylogger that does the latter
   lives in [aimbot-keylogger](https://github.com/dat58/aimbot-keylogger).
 - **PC2** — **Ubuntu 24.04**, runs this project in Docker. Takes frames in,
-  runs detection, and drives the mouse over a serial link (MAKCU) back to PC1.
+  runs detection, and drives the mouse over a serial link back to PC1 — a
+  MAKCU box by default, or a Medius one; see [Mouse devices](#mouse-devices).
 
 A capture card attached directly to PC2 replaces the NDI/UDP hop entirely; see
 [Capture from a capture card](#capture-from-a-capture-card).
 
 ## Configure
+
+Needs **Rust 1.90** — see [Medius](#medius) for why.
 
 ```
 cp config.example.toml config.toml
@@ -38,8 +41,8 @@ Every setting lives in that file; see
 | `elgato:///dev/video1` | Capture card on the named node |
 | anything else | Passed to FFmpeg as a URL (UDP/RTSP/...) |
 
-NDI is behind cargo features: `ndi4` (default) or `ndi6` — see
-`Dockerfile.ndi6`.
+NDI is behind cargo features: `ndi4` (default) or `ndi6`. The shipped
+Dockerfiles build `ndi4`; swap the feature in the builder stage for `ndi6`.
 
 ## Prepare a model
 
@@ -149,10 +152,9 @@ from under the loader is a bad idea.
 The final stage ends with an `ldd` check, so a missing library fails the build
 instead of the deployment.
 
-Note that `Dockerfile`, `Dockerfile.ndi6` and `Dockerfile.mouse_test` still use
-the original distroless final stage, which copies only those 6 libraries and
-therefore does not carry OpenCV. Only `Dockerfile.openvino` has the `ldd`
-harvest.
+Note that `Dockerfile` still uses the original distroless final stage, which
+copies only those 6 libraries and therefore does not carry OpenCV. Only
+`Dockerfile.openvino` has the `ldd` harvest.
 
 ### Choosing `ORT_OPENVINO_VERSION`
 
@@ -304,7 +306,7 @@ listener is reachable on the host's address directly.
 
 ```yaml
     devices:
-      - "/dev/ttyACM0:/dev/ttyACM0"   # makcu_port
+      - "/dev/ttyACM0:/dev/ttyACM0"   # [mouse] port
       - "/dev/video0:/dev/video0"     # capture_device, capture-card source only
       - "/dev/dri:/dev/dri"           # openvino_device_type=GPU only
 ```
@@ -326,14 +328,84 @@ The listener serves `GET /health`, `GET /stream/status`,
 `GET /stream/board` (the board controller UI) and
 `PUT /stream/event/{id}`, bound to `0.0.0.0:$event_listener_port`.
 
+## Mouse devices
+
+The device and the movement are two independent choices. `[mouse].device` picks
+what holds the mouse; each profile's `mover` picks what shape the movement has.
+Adding either is one file and one match arm — `src/mouse/` for a device,
+`src/mouse/mover/` for a movement — and neither touches the other.
+
+| `device` | Link | Notes |
+| --- | --- | --- |
+| `makcu` (default) | Serial, `baud` negotiated at connect | Reads the physical mouse's buttons back, walks a bezier in firmware, and answers `km.move_now` on V4.028+ firmware |
+| `medius` | Serial, fixed 6 Mbaud, framed | No button read-back, no firmware bezier; renders injected motion through its own model instead |
+
+```toml
+[mouse]
+device = "makcu"
+port = "/dev/ttyACM0"
+baud = 4000000
+listen = false
+dpi = 1000.0
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `device` | `makcu` | `makcu` or `medius` |
+| `port` | **required** | Serial node. An empty string means "open the first box found" — Medius only |
+| `baud` | `115200` | MAKCU only; one of `115200`, `2000000`, `4000000` |
+| `listen` | `false` | Watch the physical mouse's buttons to toggle trigger / auto-aim. Ignored, with a warning, on a device that cannot read them |
+| `dpi` | `1000` | Counts per inch the mouse is actually set to. Not a knob |
+| `render` | `despiked` | Medius only: `off`, `stock`, `despiked`, `unsmoothed` |
+| `render_full` | `false` | Medius only: render the operator's own motion too instead of relaying it untouched |
+| `lock_move` | `false` | Medius only: blank the operator's own motion around each injected move, so the two cannot add up |
+
+The `[mouse]` table has to sit **after every top-level key and before the first
+`[[profile]]`** — TOML assigns every key following a header to that table, so a
+`[mouse]` placed mid-file would swallow `esp_button_1_profile` and friends.
+
+### Medius
+
+An alternative firmware with its own crate, compiled in unconditionally — set
+`device = "medius"` and it is there.
+
+The crate is why this project needs **Rust 1.90**: it uses let-chains, which
+only stabilised in 1.88, and it advertises an MSRV of 1.85 that it does not
+actually honour. `rust-version` in `Cargo.toml` pins 1.90.0, and both
+Dockerfiles `rustup install` it over the base image's 1.86.
+
+What it does not do:
+
+- **Read the physical mouse's buttons.** `listen` has no effect, and the MAKCU
+  side-4 / side-5 shortcuts are unavailable. The ESP buttons still work, since
+  those arrive on their own board.
+- **Walk a bezier in firmware.** `mover = "bezier"` falls back to one straight
+  move.
+- **Use `baud`.** The link is fixed at 6 Mbaud.
+
+`move_smooth_move_now` maps onto the box's immediate path, so a timed flick is
+emitted report by report rather than waiting for native motion to ride.
+
+`lock_move = true` wraps every report in `lock_all(Aim)` / `unlock_all(Aim)`,
+which is three frames on the wire instead of one. At
+`move_smooth_poll_hz = 1000` that is 3000 frames a second — if the velocity
+profile smears with it on, this is the first thing to turn off.
+
 ## Mouse movement
 
-A mouse delta is played one of two ways:
+A mouse delta is played one of three ways, chosen per profile by `mover`:
 
-| Movement | What it is |
+| `mover` | What it is |
 | --- | --- |
-| `move_smooth` | The host plans a human flick and plays it as a stream of small `km.move` reports on a fixed cadence. |
-| `move_bezier` | The original single `km.move(dx,dy,steps,ref_x,ref_y)`, interpolated by the MAKCU firmware. |
+| `smooth` (default) | The host plans a human flick and plays it as a stream of small reports on its own fixed cadence. |
+| `bezier` | The whole delta in one command, walked by the device (`km.move(dx,dy,steps,ref_x,ref_y)` on MAKCU). A device with no curve command gets a straight move instead. |
+| `direct` | The delta exactly as it arrives, one report, no model at all. Auto-clicks like `smooth` does. |
+
+`direct` keeps no state between frames, which means **no sub-count carry**: a
+delta under one count truncates to zero and is lost. At a low counts-per-pixel
+(high `game_sens`, low `[mouse].dpi`) small corrections will not move at all.
+That is the direct consequence of doing no arithmetic, not a bug — use `smooth`
+if you want the remainder carried.
 
 ### Which one is used
 
@@ -345,8 +417,8 @@ The profile decides. Which profile is in play depends on the ESP button:
 | Everything else — ESP button 1, MAKCU side 4, no-trigger auto aim | `esp_button_1_profile` | same | same |
 
 `mover` defaults to `"smooth"`, so a profile that says nothing gets the
-human-flick model. Setting `mover = "bezier"` hands the whole delta to the
-firmware instead, and that path never auto-clicks.
+human-flick model. `"bezier"` hands the whole delta to the device and never
+auto-clicks; `"direct"` sends it untouched and does auto-click.
 
 Setting `aim_mode = "horizon"` reproduces what used to be hard-wired to ESP
 button 2. Horizon sends x straight to the centre of the box, while y is only
@@ -388,11 +460,11 @@ predict how a setting will feel before trying it.
 2. **Size, in mouse counts.**
 
    ```text
-   counts = dist × frame_to_screen × 96 / game_sens / mouse_dpi
+   counts = dist × frame_to_screen × 96 / game_sens / [mouse].dpi
    ```
 
-   `fov` therefore caps every flick. At `mouse_dpi = 1000`, `game_sens = 1.0`, a
-   35 px fov means no flick is ever larger than 3.4 counts.
+   `fov` therefore caps every flick. At `[mouse].dpi = 1000`, `game_sens = 1.0`,
+   a 35 px fov means no flick is ever larger than 3.4 counts.
 
 3. **Ballistic gain.** The flick commits to `move_smooth_gain` of that, ±4.5%.
    A share `move_smooth_overshoot_p` of flicks overshoot to about 106% instead.
@@ -421,8 +493,8 @@ smooth  ≈ 0.9 × fov / MT   px/s
 bezier  ≈ fov × fps        px/s
 ```
 
-**Worked example** — `fov = 35`, `mouse_dpi = 1000`, `game_sens = 1.0`,
-`makcu_baud=4000000`, a target whose `min_zone` is 21 px:
+**Worked example** — `fov = 35`, `[mouse].dpi = 1000`, `game_sens = 1.0`,
+`[mouse].baud = 4000000`, a target whose `min_zone` is 21 px:
 
 | Step | Value |
 | --- | --- |
@@ -448,7 +520,7 @@ All optional. Every value here is read once at startup.
 | `move_smooth_fitts_b_ms` | `55` | Cost per bit of difficulty. Dominates on long flicks. |
 | `move_smooth_min_ms` | `45` | Floor on `MT`. Lower it together with `fitts_a_ms`, or it binds and the change does nothing. |
 | `move_smooth_max_ms` | `320` | Ceiling on `MT`, for the longest flicks. |
-| `move_smooth_poll_hz` | `0` | Report cadence. `0` picks 1000 Hz at `makcu_baud` ≥ 2M and 250 Hz below. **Does not change `MT`**; see [Choosing poll_hz](#choosing-poll_hz). |
+| `move_smooth_poll_hz` | `0` | Report cadence. `0` picks 1000 Hz at `[mouse].baud` ≥ 2M and 250 Hz below. **Does not change `MT`**; see [Choosing poll_hz](#choosing-poll_hz). |
 
 #### Report density — why a flick can look like it is not moving
 
@@ -465,8 +537,8 @@ badly wrong for an in-region correction, which is a handful.
 
 Fitts's index of difficulty is a *ratio* of distance to width, so it is the same
 for a 5-count flick and a 5000-count one and says nothing about how far the hand
-moves. `counts / mouse_dpi` does — it is inches. The speed envelope is expressed
-in inches precisely so it holds at any `mouse_dpi` and `game_sens` without
+moves. `counts / dpi` does — it is inches. The speed envelope is expressed
+in inches precisely so it holds at any `[mouse].dpi` and `game_sens` without
 retuning, since neither is a knob you get to pick.
 
 Fitts describes *aimed* reaches, where landing accurately is the cost. A
@@ -474,7 +546,7 @@ correction far too small for that just travels at the hand's comfortable speed,
 which makes its duration proportional to its length — Fitts's law is known to
 flatten out at very low indices of difficulty for the same reason.
 
-Measured at `game_sens = 0.38`, `mouse_dpi = 1000` on a real MAKCU:
+Measured at `game_sens = 0.38`, `[mouse].dpi = 1000` on a real MAKCU:
 
 | Reach | Counts | Reports | Duration |
 | --- | --- | --- | --- |
@@ -521,12 +593,13 @@ re-reacts after every pause, not only on a new target.
 
 ### Auto click
 
-Fires a left click once a flick has been played. Only the `move_smooth` path
-does this, so a profile with `mover = "bezier"` never auto-clicks. The click
-runs on the mouse worker thread, so the aim loop never blocks on it.
+Fires a left click once a movement has been played. `smooth` and `direct` both
+do this and share the same policy; `mover = "bezier"` never auto-clicks. The
+click runs on the mouse worker thread, so the aim loop never blocks on it.
 
 Each profile keeps its own click timestamp, so the rate limit below is counted
-per profile rather than across the whole session.
+per profile rather than across the whole session. A `direct` profile reads only
+these four keys out of the `move_smooth_*` set and ignores the rest.
 
 | Key | Default | Effect |
 | --- | --- | --- |
@@ -576,7 +649,7 @@ whether a *movement* goes past its target rather than whether a *shot* does.
 
 ### Choosing poll_hz
 
-| `makcu_baud` | Wire time per command | Rate picked by `0` |
+| `[mouse].baud` | Wire time per command | Rate picked by `0` |
 | --- | --- | --- |
 | `115200` | 1.56 ms | 250 Hz |
 | `2000000` | 90 µs | 1000 Hz |
@@ -587,7 +660,7 @@ flick lasts. What matters is how many counts a flick carries against how many
 slots it gets, so work out the largest flick first:
 
 ```text
-max counts = fov × frame_to_screen × 96 / game_sens / mouse_dpi
+max counts = fov × frame_to_screen × 96 / game_sens / [mouse].dpi
 ```
 
 - **Up to ~4 counts:** `250` is free — same timing on the wire as 1000 Hz, four
@@ -595,7 +668,7 @@ max counts = fov × frame_to_screen × 96 / game_sens / mouse_dpi
   this has to be set by hand.
 - **More than that:** leave it at `0`. At 250 Hz a short flick has so few slots
   that counts pile up into a single report. With `game_sens = 0.38`,
-  `mouse_dpi = 1000` and `fov = 35` (8.8 counts), a 53 ms flick gets 13 slots at
+  `[mouse].dpi = 1000` and `fov = 35` (8.8 counts), a 53 ms flick gets 13 slots at
   250 Hz and its biggest report jumps 8.1 px; at 1000 Hz it gets 53 slots and
   no report exceeds one count (4.2 px).
 - **Never above 1000.** No real mouse reports faster, so a higher rate is a
@@ -668,8 +741,8 @@ Median `MT` for a body-sized target (`W` = 64 px):
 | 180 px | 74 ms | 185 ms |
 | 600 px | 109 ms | 272 ms |
 
-Measured at `fov = 35`, `mouse_dpi = 1000`, `game_sens = 1.0`, 4M baud, over the
-range of `min_zone` a target actually produces:
+Measured at `fov = 35`, `[mouse].dpi = 1000`, `game_sens = 1.0`, 4M baud, over
+the range of `min_zone` a target actually produces:
 
 | | Tight fov | Default |
 | --- | --- | --- |
@@ -687,18 +760,18 @@ every strafing target.
 
 ### Tuning procedure
 
-1. **Get `mouse_dpi` and `game_sens` right first.** Every flick is sized in
+1. **Get `[mouse].dpi` and `game_sens` right first.** Every flick is sized in
    counts derived from them, so a wrong value makes each one the wrong size and
-   no smooth setting can compensate. Both must be above zero; startup panics
+   no smooth setting can compensate. Both must be above zero; startup fails
    otherwise.
 2. **Pick a preset from your fov.**
 3. **Check the device keeps up.** Run `mouse_test`, type `s` at the `dx`
    prompt to switch paths, and compare the planned duration with the measured
    one it prints. Measured consistently longer than planned means the host or
    the MAKCU cannot hold the cadence — lower `move_smooth_poll_hz`.
-4. **A/B in game.** Give one profile `mover = "bezier"` and the other
-   `mover = "smooth"`, keeping every other key identical, and compare the same
-   shot under each ESP button. Leaving `aim_mode` unset in both keeps the target
+4. **A/B in game.** Give one profile `mover = "bezier"` (or `"direct"`) and the
+   other `mover = "smooth"`, keeping every other key identical, and compare the
+   same shot under each ESP button. Leaving `aim_mode` unset in both keeps the target
    choice identical, which is what makes the comparison about the movement.
 5. **Adjust one symptom at a time:**
 
@@ -738,9 +811,9 @@ failure this replaces.
 ### Required
 
 `source_stream`, `model_path`, `model_input_size`, `model_conf_body`,
-`model_conf_head`, `model_iou`, `makcu_port`, `esp_button_1_profile`,
-`esp_button_2_profile`, and at least one `[[profile]]` with a `name` and a
-`scale_min_zone`.
+`model_conf_head`, `model_iou`, `esp_button_1_profile`, `esp_button_2_profile`,
+a `[mouse]` table with a `port`, and at least one `[[profile]]` with a `name`
+and a `scale_min_zone`.
 
 Unlike the environment version, `trt_*` and `openvino_cache_dir` are **not**
 required: they are only read by the provider that uses them, so an OpenVINO or
@@ -770,10 +843,10 @@ no-trigger auto-aim path.
 | `name` | **required** | Shown in logs; has no effect on aim |
 | `scale_min_zone` | **required** | Dead-zone scale. Below `min_zone * this` no move is queued |
 | `fov` | whole frame | Maximum engagement distance in frame pixels. `0` or absent means no limit |
-| `mover` | `"smooth"` | `"smooth"` for the human-flick model, `"bezier"` to hand the whole delta to the firmware |
+| `mover` | `"smooth"` | `"smooth"` for the human-flick model, `"bezier"` to hand the whole delta to the device, `"direct"` to send it untouched |
 | `aim_mode` | follows the runtime mode | `"head"`, `"neck"`, `"chest"`, `"abdomen"`, `"horizon"`. Set, it pins this profile to that mode; absent, it follows whatever the event listener last selected |
 
-Each profile carries its own `SmoothAim`, so the sub-count remainder, the
+Each profile carries its own mover instance, so the sub-count remainder, the
 reaction window and the auto-click rate limit are tracked per profile rather
 than shared.
 
@@ -831,13 +904,13 @@ move_smooth_auto_click_miss_p = 0.1
 
 ### Output
 
+The mouse link lives in its own `[mouse]` table, documented under
+[Mouse devices](#mouse-devices). These two stay at the top level, because
+neither is a fact about the mouse:
+
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `makcu_port` | **required** | Serial port of the MAKCU device |
-| `makcu_baud` | `115200` | |
-| `makcu_listen` | `false` | Watch mouse buttons to toggle trigger / auto-aim |
-| `mouse_dpi` | `1000` | |
-| `game_sens` | `1.0` | |
+| `game_sens` | `1.0` | In-game sensitivity |
 | `esp_port` | unset | Serial port of the ESP button board |
 
 ### Human-flick movement
@@ -848,7 +921,7 @@ own. What each one does, how to compute its effect and presets by fov are under
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `move_smooth_poll_hz` | `0` | Report cadence; `0` derives it from `makcu_baud` |
+| `move_smooth_poll_hz` | `0` | Report cadence; `0` derives it from `[mouse].baud` |
 | `move_smooth_fitts_a_ms` / `_b_ms` | `35` / `55` | Fitts intercept and slope, ms and ms per bit |
 | `move_smooth_min_ms` / `_max_ms` | `45` / `320` | Movement-time clamp |
 | `move_smooth_gain` | `0.90` | Fraction of the distance the ballistic phase commits to |
@@ -860,7 +933,7 @@ own. What each one does, how to compute its effect and presets by fov are under
 | `move_smooth_react_min_ms` / `_max_ms` | `0` / `0` | Reaction latency on a fresh target; off by default |
 | `move_smooth_counts_per_report` | `2.0` | Mean counts one report carries; caps how many reports a flick plans |
 | `move_smooth_min_speed_ips` / `_max_speed_ips` | `0.6` / `40` | Hand-speed envelope in inches per second; the floor sets the duration below a few hundred counts |
-| `move_smooth_move_now` | `false` | Emit `km.move_now` instead of `km.move`. Probed at connect and ignored on firmware without it |
+| `move_smooth_move_now` | `false` | Ask the device to put the counts in its next report untouched, skipping any interpolation of its own. Probed at connect and ignored where the device has no such command |
 | `move_smooth_auto_click` | `false` | Click once a flick has settled |
 | `move_smooth_auto_click_lower_ms` / `_upper_ms` | `100` / `130` | Wait between the flick and the click |
 | `move_smooth_auto_click_rate_limit_ms` | `0` | Smallest gap between two clicks, ms; `0` is no limit |

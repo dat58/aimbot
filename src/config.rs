@@ -320,7 +320,6 @@ impl std::fmt::Display for MoverKind {
 pub enum DeviceKind {
     #[default]
     Makcu,
-    #[cfg(feature = "medius")]
     Medius,
 }
 
@@ -328,7 +327,6 @@ impl std::fmt::Display for DeviceKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DeviceKind::Makcu => write!(f, "makcu"),
-            #[cfg(feature = "medius")]
             DeviceKind::Medius => write!(f, "medius"),
         }
     }

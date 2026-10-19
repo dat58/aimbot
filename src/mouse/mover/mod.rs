@@ -6,12 +6,14 @@
 
 pub mod bezier;
 pub mod constant;
+pub mod direct;
 pub mod smooth;
 
 use crate::config::{MoverKind, Profile};
 use crate::mouse::MouseDevice;
 use anyhow::Result;
 use bezier::BezierMover;
+use direct::DirectMover;
 use rand::RngCore;
 use smooth::SmoothMover;
 use std::time::{Duration, Instant};
@@ -101,5 +103,6 @@ pub fn build(profile: &Profile, baud: u32, dpi: f64) -> Box<dyn Mover> {
     match profile.mover {
         MoverKind::Smooth => Box::new(SmoothMover::new(profile.smooth, baud, dpi)),
         MoverKind::Bezier => Box::new(BezierMover),
+        MoverKind::Direct => Box::new(DirectMover::new(profile.smooth)),
     }
 }

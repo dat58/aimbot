@@ -297,6 +297,10 @@ pub enum MoverKind {
     #[default]
     Smooth,
     Bezier,
+    /// Sends the delta as it arrives, with no model over the top. Still reads
+    /// the `move_smooth_auto_click_*` keys, which is all it takes from
+    /// [`SmoothConfig`].
+    Direct,
 }
 
 impl std::fmt::Display for MoverKind {
@@ -304,6 +308,7 @@ impl std::fmt::Display for MoverKind {
         match self {
             MoverKind::Smooth => write!(f, "smooth"),
             MoverKind::Bezier => write!(f, "bezier"),
+            MoverKind::Direct => write!(f, "direct"),
         }
     }
 }

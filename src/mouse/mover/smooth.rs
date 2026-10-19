@@ -283,19 +283,23 @@ fn render_weights(out: &mut Vec<f64>, mt_ms: f64, peak_frac: f64, n: usize) {
 /// they arrive on. Keeping it out of `move_smooth` also stops those correction
 /// flicks from each planning a click of their own.
 pub fn plan_click(state: &SmoothMover, random: &mut impl Rng) -> ClickPlan {
-    let cfg = state.cfg;
+    plan_click_for(&state.cfg, state.last_click, random)
+}
+
+/// [`plan_click`] over the tuning and the last click alone, so a mover that is
+/// not the flick model can share the same policy rather than restate it.
+pub fn plan_click_for(
+    cfg: &SmoothConfig,
+    last_click: Option<Instant>,
+    random: &mut impl Rng,
+) -> ClickPlan {
     if !cfg.auto_click {
         return ClickPlan::None;
     }
     let wait = auto_click_delay(cfg.auto_click_lower_ms, cfg.auto_click_upper_ms, random);
     // Asked before the wait, so a click the limit would refuse costs no time at
     // all and the worker goes straight back to tracking.
-    if !click_allowed(
-        state.last_click,
-        Instant::now(),
-        wait,
-        cfg.auto_click_rate_limit_ms,
-    ) {
+    if !click_allowed(last_click, Instant::now(), wait, cfg.auto_click_rate_limit_ms) {
         return ClickPlan::None;
     }
     if random.random::<f64>() < cfg.auto_click_miss_p.clamp(0., 1.) {

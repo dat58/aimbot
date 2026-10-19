@@ -320,14 +320,33 @@ impl std::fmt::Display for MoverKind {
 pub enum DeviceKind {
     #[default]
     Makcu,
+    #[cfg(feature = "medius")]
+    Medius,
 }
 
 impl std::fmt::Display for DeviceKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DeviceKind::Makcu => write!(f, "makcu"),
+            #[cfg(feature = "medius")]
+            DeviceKind::Medius => write!(f, "medius"),
         }
     }
+}
+
+/// How a Medius box renders injected motion. Ignored by every other device.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderMode {
+    /// Even fill at the paced rate, with the model out of the path.
+    Off,
+    /// The bit-exact triangular smoother.
+    Stock,
+    /// The smoother with a ramped onset. What the box itself boots in.
+    #[default]
+    Despiked,
+    /// No smoother: the model gets the raw injection.
+    Unsmoothed,
 }
 
 /// Everything about the link to the physical mouse, which is a fact about the
@@ -351,6 +370,17 @@ pub struct MouseConfig {
     /// into a hand speed.
     #[serde(default = "default_mouse_dpi")]
     pub dpi: f64,
+    /// Medius only; see [`RenderMode`].
+    #[serde(default)]
+    pub render: RenderMode,
+    /// Render the operator's own motion too, instead of relaying it
+    /// untouched. The box boots with this off. Medius only.
+    #[serde(default)]
+    pub render_full: bool,
+    /// Blank the operator's own motion for the frame an injected move lands
+    /// in, so the two cannot add up. Medius only.
+    #[serde(default)]
+    pub lock_move: bool,
 }
 
 /// One set of aim and movement tuning, selected by which ESP button is held.

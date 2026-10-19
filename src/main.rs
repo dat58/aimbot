@@ -127,7 +127,16 @@ fn main() -> Result<()> {
                 })?;
                 tracing::info!("Mouse initialized");
 
-                if config.mouse.listen {
+                // A device with no return channel has no button reports to
+                // pump, and `listen` returning would take the process down
+                // with it.
+                if config.mouse.listen && !mouse.caps().buttons {
+                    tracing::warn!(
+                        "[Mouse] {} cannot read the physical buttons; listen is ignored",
+                        mouse.name()
+                    );
+                }
+                if config.mouse.listen && mouse.caps().buttons {
                     let m = mouse.clone();
                     let running = keep_running_clone.clone();
                     thread::spawn(move || {

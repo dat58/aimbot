@@ -8,12 +8,16 @@
 //! [`mover`] and an arm in [`mover::build`]. Neither touches the other.
 
 pub mod makcu;
+#[cfg(feature = "medius")]
+pub mod medius;
 pub mod mover;
 
 use crate::config::{DeviceKind, MouseConfig};
 use anyhow::Result;
 use crossbeam::queue::ArrayQueue;
 use makcu::Makcu;
+#[cfg(feature = "medius")]
+use medius::Medius;
 use mover::constant::{CLICK_HOLD_MS, IDLE_POLL};
 use mover::{ClickPlan, MoveRequest, Mover};
 use rand::prelude::*;
@@ -103,6 +107,8 @@ pub trait MouseDevice: Send + Sync {
 pub fn connect(cfg: &MouseConfig) -> Result<Arc<dyn MouseDevice>> {
     let device: Arc<dyn MouseDevice> = match cfg.device {
         DeviceKind::Makcu => Arc::new(Makcu::new(&cfg.port, cfg.baud)?),
+        #[cfg(feature = "medius")]
+        DeviceKind::Medius => Arc::new(Medius::new(cfg)?),
     };
     tracing::info!("[Mouse] {} on {}", device.name(), cfg.port);
     Ok(device)

@@ -1,4 +1,7 @@
 FROM vtdat58/rust:1.86.0-cuda11.8.0-cudnn8-tensorrt8.6.1.6-onnxruntime1.21.1-opencv4.8.0-videoio-ndi-dylib AS chef
+ARG RUST_VERSION=1.90.0
+RUN rustup install ${RUST_VERSION} && \
+    rustup default ${RUST_VERSION}
 WORKDIR /app
 
 FROM python:3.12-slim-bookworm AS ort-openvino

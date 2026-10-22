@@ -1,6 +1,9 @@
 use aimbot::{
     config::Config,
-    mouse::{MouseVirtual, SmoothAim, plan_flick},
+    mouse::{
+        Button, MouseDevice, connect,
+        mover::{Aim, Mover, bezier::BezierMover, smooth::SmoothMover, smooth::plan_flick},
+    },
     stream::open_source,
 };
 use opencv::{
@@ -9,10 +12,7 @@ use opencv::{
 };
 use std::{
     error::Error,
-    sync::{
-        Arc,
-        mpsc::{self, Receiver, RecvTimeoutError},
-    },
+    sync::mpsc::{self, Receiver, RecvTimeoutError},
     thread,
     time::{Duration, Instant},
 };
@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .init();
     let config = Config::load(std::path::Path::new("config.toml"))
         .expect("cannot load config.toml");
-    let mouse = Arc::new(MouseVirtual::new(&config.makcu_port, config.makcu_baud)?);
+    let mouse = connect(&config.mouse)?;
 
     // `mouse_test latency [counts] [samples]` measures the capture latency and
     // skips the interactive button checks.
@@ -41,37 +41,37 @@ fn main() -> Result<(), Box<dyn Error>> {
             Some(v) => v.parse::<usize>()?,
             None => 20,
         };
-        return measure_latency(&config, &mouse, counts, samples);
+        return measure_latency(&config, &*mouse, counts, samples);
     }
 
     let mouse_clone = mouse.clone();
     thread::spawn(move || {
-        mouse_clone.listen_button_presses();
+        mouse_clone.listen();
     });
     tracing::info!("[1] Testing for left mouse button presses");
     tracing::info!("[1] Please hold your left mouse button");
-    while !mouse.is_left_pressing() {
+    while !mouse.is_pressing(Button::Left) {
         thread::sleep(Duration::from_millis(100));
     }
     tracing::info!("[1] Testing left mouse button presses successfully");
     tracing::info!("---------------------------------------------------");
     tracing::info!("[2] Testing for right mouse button presses");
     tracing::info!("[2] Please hold your right mouse button");
-    while !mouse.is_right_pressing() {
+    while !mouse.is_pressing(Button::Right) {
         thread::sleep(Duration::from_millis(100));
     }
     tracing::info!("[2] Testing right mouse button presses successfully");
     tracing::info!("---------------------------------------------------");
     tracing::info!("[3] Testing for side4 mouse button presses");
     tracing::info!("[3] Please hold your side4 mouse button");
-    while !mouse.is_side4_pressing() {
+    while !mouse.is_pressing(Button::Side4) {
         thread::sleep(Duration::from_millis(100));
     }
     tracing::info!("[3] Testing side4 mouse button presses successfully");
     tracing::info!("---------------------------------------------------");
     tracing::info!("[4] Testing for side5 mouse button presses");
     tracing::info!("[4] Please hold your side5 mouse button");
-    while !mouse.is_side5_pressing() {
+    while !mouse.is_pressing(Button::Side5) {
         thread::sleep(Duration::from_millis(100));
     }
     tracing::info!("[4] Testing side5 mouse button presses successfully");
@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut random = rand::rng();
     let profile = config.profile(config.esp_button_1_profile);
     tracing::info!("[5] Using profile {:?} ({})", profile.name, profile.mover);
-    let mut smooth = SmoothAim::new(profile.smooth, config.makcu_baud, config.mouse_dpi);
+    let mut smooth = SmoothMover::new(profile.smooth, config.mouse.baud, config.mouse.dpi);
     let mut use_smooth = true;
     tracing::info!("[5] Testing for mouse move");
     tracing::info!("[5] Input separate for dy, dy; type q to quit, s to switch path");
@@ -127,7 +127,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .filter(|s| (s.dx, s.dy) != (0, 0))
                         .count();
                     let start = Instant::now();
-                    mouse.play_flick(&flick, || true)?;
+                    smooth.play(&*mouse, &flick, &|| true)?;
                     tracing::info!(
                         "moved {:?} over {} reports ({writes} on the wire), planned {:?}, took {:?}",
                         flick.total,
@@ -139,7 +139,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                 _ => tracing::info!("nothing to move"),
             }
         } else {
-            mouse.move_bezier(dx as f64, dy as f64, &mut random)?;
+            BezierMover.apply(
+                &*mouse,
+                Aim {
+                    delta: (dx as f64, dy as f64),
+                    reach_px: 0.,
+                    width_px: 0.,
+                },
+                &mut random,
+                &|| true,
+            )?;
         }
         tracing::info!("-------------------------");
     }
@@ -158,7 +167,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// than the scene's own noise.
 fn measure_latency(
     config: &Config,
-    mouse: &MouseVirtual,
+    mouse: &dyn MouseDevice,
     counts: i32,
     samples: usize,
 ) -> Result<(), Box<dyn Error>> {
@@ -252,7 +261,7 @@ fn measure_latency(
             rand::random::<f64>() * frame_ms / 1000.,
         ));
         let t0 = Instant::now();
-        mouse.move_shift((dir * counts) as f64, 0.)?;
+        mouse.move_to(dir * counts, 0)?;
         dir = -dir;
         match first_change(&rx, &baseline, t0, threshold, Duration::from_millis(1500))? {
             Some((latency, change)) => {
@@ -271,7 +280,7 @@ fn measure_latency(
     }
     // An odd number of moves leaves the view turned; put it back.
     if dir == -1 {
-        mouse.move_shift((dir * counts) as f64, 0.)?;
+        mouse.move_to(dir * counts, 0)?;
     }
 
     if latencies.is_empty() {

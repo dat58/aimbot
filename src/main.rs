@@ -2,11 +2,14 @@
 #![allow(unused_imports)]
 use aimbot::{
     aim::{AimMode, Mode},
-    config::{Config, Mover, mouse_counts},
+    config::{Config, mouse_counts},
     esp_button::EspButton,
     event::start_event_listener,
     model::{Bbox, Model, Point2f},
-    mouse::{MouseVirtual, MoveRequest, SmoothAim, handle_mouse},
+    mouse::{
+        Button, connect, handle_mouse, on_button_hold,
+        mover::{self, Aim, MoveRequest, Mover},
+    },
     stream::{handle_capture, open_source},
 };
 use anyhow::{Result, anyhow};
@@ -58,8 +61,6 @@ fn main() -> Result<()> {
         config.frame_height as f32 / 2.,
     );
     let serving_port_event_listener = config.event_listener_port;
-    let makcu_port = config.makcu_port.clone();
-    let makcu_baud = config.makcu_baud;
     let esp_port = config.esp_port.clone();
     let source_stream = open_source(&config)?;
     let model = Model::new(config.clone())?;
@@ -121,20 +122,26 @@ fn main() -> Result<()> {
 
             #[cfg(not(feature = "disable-mouse"))]
             let mouse = {
-                let mouse =
-                    MouseVirtual::new(&config.makcu_port, config.makcu_baud).map_err(|err| {
-                        anyhow!(format!("Mouse cannot not initialized due to {}", err))
-                    })?;
+                let mouse = connect(&config.mouse).map_err(|err| {
+                    anyhow!(format!("Mouse cannot not initialized due to {}", err))
+                })?;
                 tracing::info!("Mouse initialized");
 
-                let mouse = Arc::new(mouse);
-
-                if config.makcu_listen {
+                // A device with no return channel has no button reports to
+                // pump, and `listen` returning would take the process down
+                // with it.
+                if config.mouse.listen && !mouse.caps().buttons {
+                    tracing::warn!(
+                        "[Mouse] {} cannot read the physical buttons; listen is ignored",
+                        mouse.name()
+                    );
+                }
+                if config.mouse.listen && mouse.caps().buttons {
                     let m = mouse.clone();
                     let running = keep_running_clone.clone();
                     thread::spawn(move || {
                         tracing::info!("Start listening mouse button");
-                        m.listen_button_presses();
+                        m.listen();
                         running.store(false, Ordering::Relaxed);
                     });
 
@@ -152,9 +159,11 @@ fn main() -> Result<()> {
                             auto_aim_clone.store(true, Ordering::Release);
                             tracing::info!("trigger modified to {}", last_value);
                         });
-                        m.handle_right_holding(
+                        on_button_hold(
+                            m,
                             // hold right mouse to switch
                             // between trigger & auto aim bot
+                            Button::Right,
                             Duration::from_millis(500),
                             Duration::from_millis(50),
                             f,
@@ -174,8 +183,10 @@ fn main() -> Result<()> {
                                 tracing::info!("Auto aim modified to true");
                             }
                         });
-                        m.handle_side4_holding(
+                        on_button_hold(
+                            m,
                             // hold side4 mouse button ~20 millis second `turn on` auto aim
+                            Button::Side4,
                             Duration::from_millis(0),
                             Duration::from_millis(50),
                             f,
@@ -195,8 +206,10 @@ fn main() -> Result<()> {
                                 tracing::info!("Auto aim modified to false");
                             }
                         });
-                        m.handle_side5_holding(
+                        on_button_hold(
+                            m,
                             // hold side5 mouse button ~20 millis second `turn off` auto aim
+                            Button::Side5,
                             Duration::from_millis(0),
                             Duration::from_millis(50),
                             f,
@@ -219,23 +232,24 @@ fn main() -> Result<()> {
                 let mouse = mouse.clone();
                 let side4 = mouse.clone();
                 let queue = move_queue.clone();
-                let smooth: Vec<SmoothAim> = config
+                // One mover per profile, index-aligned with
+                // `MoveRequest::profile`: each carries its own tuning and its
+                // own state between frames.
+                let movers: Vec<Box<dyn Mover>> = config
                     .profiles
                     .iter()
-                    .map(|profile| {
-                        SmoothAim::new(profile.smooth, config.makcu_baud, config.mouse_dpi)
-                    })
+                    .map(|profile| mover::build(profile, config.mouse.baud, config.mouse.dpi))
                     .collect();
                 let trigger = trigger.clone();
                 let button1 = esp_button1.clone();
                 let button2 = esp_button2.clone();
                 thread::spawn(move || {
-                    handle_mouse(mouse, queue, smooth, move || {
+                    handle_mouse(mouse, queue, movers, move || {
                         let use_trigger = trigger.load(Ordering::Acquire);
                         !use_trigger
                             || button1.load(Ordering::Acquire)
                             || button2.load(Ordering::Acquire)
-                            || side4.is_side4_pressing()
+                            || side4.is_pressing(Button::Side4)
                     });
                 });
             }
@@ -300,22 +314,22 @@ fn main() -> Result<()> {
                                     ),
                                     config.frame_to_screen,
                                     config.game_sens,
-                                    config.mouse_dpi,
+                                    config.mouse.dpi,
                                 );
                                 let use_trigger = trigger.load(Ordering::Acquire);
                                 let fire = (use_trigger
                                     && (esp_button1_pressed
                                         || esp_button2_pressed
-                                        || mouse.is_side4_pressing()))
+                                        || mouse.is_pressing(Button::Side4)))
                                     || (!use_trigger);
                                 if fire {
                                     // Overwrites whatever the worker has not
                                     // started yet. A queued aim describes where
                                     // the target was a frame ago, so the newest
                                     // one is the only one worth playing.
-                                    move_queue.force_push(match profile.mover {
-                                        Mover::Smooth => MoveRequest::Smooth {
-                                            profile: profile_index,
+                                    move_queue.force_push(MoveRequest {
+                                        profile: profile_index,
+                                        aim: Aim {
                                             delta: (dx, dy),
                                             reach_px: dist * px_scale,
                                             // Fitts's W is the target's full
@@ -326,7 +340,6 @@ fn main() -> Result<()> {
                                             // make every flick a slope longer.
                                             width_px: 2. * min_zone * px_scale,
                                         },
-                                        Mover::Bezier => MoveRequest::Bezier { delta: (dx, dy) },
                                     });
                                 }
                             }

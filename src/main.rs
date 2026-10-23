@@ -256,11 +256,6 @@ fn main() -> Result<()> {
 
             let mut random = rand::rng();
             let mut last_profile = usize::MAX;
-            // Fitts measures *visual* difficulty, so it wants screen pixels,
-            // while `dist` and `min_zone` are frame pixels. The two coincide
-            // only when the capture matches the screen.
-            #[cfg(not(feature = "disable-mouse"))]
-            let px_scale = ((config.frame_to_screen.0 + config.frame_to_screen.1) / 2.) as f32;
 
             loop {
                 if auto_aim.load(Ordering::Relaxed) {
@@ -312,9 +307,7 @@ fn main() -> Result<()> {
                                         destination.x() - crosshair.x(),
                                         destination.y() - crosshair.y(),
                                     ),
-                                    config.frame_to_screen,
-                                    config.game_sens,
-                                    config.mouse.dpi,
+                                    config.optics(),
                                 );
                                 let use_trigger = trigger.load(Ordering::Acquire);
                                 let fire = (use_trigger
@@ -331,14 +324,18 @@ fn main() -> Result<()> {
                                         profile: profile_index,
                                         aim: Aim {
                                             delta: (dx, dy),
-                                            reach_px: dist * px_scale,
+                                            // Both in frame pixels. Fitts
+                                            // only reads their ratio, so the
+                                            // space they are measured in
+                                            // cancels — see `Aim`.
+                                            reach_px: dist,
                                             // Fitts's W is the target's full
                                             // width; `min_zone` is the radius
                                             // the aim may land inside, so it
                                             // doubles. Passing the radius would
                                             // add a whole bit of difficulty and
                                             // make every flick a slope longer.
-                                            width_px: 2. * min_zone * px_scale,
+                                            width_px: 2. * min_zone,
                                         },
                                     });
                                 }

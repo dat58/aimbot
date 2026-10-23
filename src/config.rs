@@ -13,7 +13,6 @@ pub const SCALE_HEAD_X: f32 = 0.6;
 pub const SCALE_NECK_Y: f32 = 2.5 / 6.;
 pub const SCALE_CHEST_Y: f32 = 3.0 / 6.;
 pub const SCALE_ABDOMEN_Y: f32 = 5.0 / 6.;
-pub const WIN_DPI_SCALE_FACTOR: f64 = 96.;
 
 /// Geometry of the frames the pipeline actually receives, plus the per-axis
 /// factor that turns a frame pixel into a screen pixel.
@@ -45,24 +44,80 @@ pub fn frame_geometry(
     (frame, scale)
 }
 
+/// How the game turns mouse counts into a view rotation.
+///
+/// Everything here is a fact about the game, not about the mouse. The mouse's
+/// DPI is deliberately absent: the game never sees it. It receives counts and
+/// multiplies them by its own per-count yaw constant, so how many counts a
+/// given turn is worth cannot depend on the hardware.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Optics {
+    /// Width of the space the delta is measured in — the frame, since that is
+    /// what detections are in. The projection is scale-free, so this only has
+    /// to agree with whatever `mouse_counts` is handed; see there.
+    pub width: f64,
+    /// Horizontal field of view in degrees, at the rendered aspect ratio.
+    pub hfov: f64,
+    /// Degrees of view rotation per mouse count at sensitivity 1.
+    pub yaw: f64,
+    /// The in-game sensitivity setting, as typed into the game.
+    pub sens: f64,
+}
+
+impl Optics {
+    /// Pinhole focal length, in the same pixels as [`Self::width`].
+    pub fn focal(&self) -> f64 {
+        (self.width / 2.) / (self.hfov.to_radians() / 2.).tan()
+    }
+
+    /// Degrees of turn one count is worth.
+    pub fn deg_per_count(&self) -> f64 {
+        self.yaw * self.sens
+    }
+}
+
 /// Mouse counts for a target `frame_delta` pixels from the crosshair.
 ///
-/// The delta arrives in frame pixels and is scaled to screen pixels first,
-/// because `MOUSE_DPI`/`GAME_SENS` are calibrated against what the game draws,
-/// not against whatever resolution the capture card happens to deliver.
-pub fn mouse_counts(
-    frame_delta: (f32, f32),
-    frame_to_screen: (f64, f64),
-    game_sens: f64,
-    mouse_dpi: f64,
-) -> (f64, f64) {
-    let counts = |d: f32, scale: f64| -> f64 {
-        d as f64 * scale * WIN_DPI_SCALE_FACTOR / game_sens / mouse_dpi
-    };
-    (
-        counts(frame_delta.0, frame_to_screen.0),
-        counts(frame_delta.1, frame_to_screen.1),
-    )
+/// Pixels are **not** proportional to view angle. The camera is a pinhole
+/// projection, so a target twice as far off centre is well under twice the
+/// turn — at a 103° horizontal field of view, 800 px is 1.68 times the
+/// rotation of 400 px, not 2. Treating the relation as a scale factor
+/// therefore overshoots, and overshoots worse the further out the target is.
+///
+/// The turn is then divided by degrees-per-count, which is where the game's
+/// sensitivity enters. `mouse.dpi` does not appear anywhere in this: it
+/// describes the hand, not the game, and its one legitimate use is the
+/// hand-speed envelope in [`crate::mouse::mover::smooth`].
+///
+/// # Why no scaling to screen pixels
+///
+/// `atan2` depends only on the ratio of its arguments, and scaling the delta
+/// into screen pixels multiplies the numerator and the focal length by the
+/// same factor:
+///
+/// ```text
+/// screen: atan2(dx · sw/fw, (sw/2)/tan(hfov/2))  ->  dx · 2·tan(hfov/2) / fw
+/// frame:  atan2(dx,         (fw/2)/tan(hfov/2))  ->  dx · 2·tan(hfov/2) / fw
+/// ```
+///
+/// The pitch cancels the same way, because
+/// `hypot((sw/2)/tan, dx·sw/fw) == (sw/fw) · hypot((fw/2)/tan, dx)`. So the
+/// delta is projected in frame space with [`Optics::width`] set to the frame
+/// width, which is one scaling fewer for the same answer. The cancellation
+/// needs the scale to be the same on both axes — [`Config::resolve`] warns if
+/// the capture's aspect ratio differs from the screen's, which is the only way
+/// `frame_geometry` produces a non-uniform one.
+pub fn mouse_counts(frame_delta: (f32, f32), optics: Optics) -> (f64, f64) {
+    let dx = frame_delta.0 as f64;
+    let dy = frame_delta.1 as f64;
+    let focal = optics.focal();
+    let yaw_deg = dx.atan2(focal).to_degrees();
+    // The pitch is measured off the already-yawed ray, so its lever arm is
+    // `hypot(focal, dx)` rather than `focal`. Using `focal` would under-rotate
+    // y for any target that is also off centre horizontally.
+    let pitch_deg = dy.atan2(focal.hypot(dx)).to_degrees();
+    let deg_per_count = optics.deg_per_count();
+    (yaw_deg / deg_per_count, pitch_deg / deg_per_count)
 }
 
 /// Report cadence for the smooth-aim playback, derived from the link speed.
@@ -466,6 +521,12 @@ fn default_mouse_dpi() -> f64 {
 fn default_game_sens() -> f64 {
     1.
 }
+fn default_game_hfov() -> f64 {
+    103.
+}
+fn default_game_yaw() -> f64 {
+    0.07
+}
 fn enabled() -> bool {
     true
 }
@@ -497,6 +558,10 @@ pub struct Config {
     pub frame_height: u32,
     /// Frame pixel -> screen pixel, per axis. `(1.0, 1.0)` when the capture
     /// already matches the screen.
+    ///
+    /// Nothing in the pipeline reads this any more: [`mouse_counts`] projects
+    /// in frame space, and Fitts reads only a ratio, so both cancel the
+    /// factor out. Kept as a description of the geometry.
     #[serde(skip)]
     pub frame_to_screen: (f64, f64),
     #[serde(default)]
@@ -592,6 +657,15 @@ pub struct Config {
     pub mouse: MouseConfig,
     #[serde(default = "default_game_sens")]
     pub game_sens: f64,
+    /// Horizontal field of view the game renders at, in degrees. Must match
+    /// the game, and must be the *horizontal* one at the actual aspect ratio.
+    #[serde(default = "default_game_hfov")]
+    pub game_hfov: f64,
+    /// Degrees of view rotation one mouse count is worth at sensitivity 1 —
+    /// the engine's own constant (`m_yaw` in Source-derived engines). Must
+    /// match the game; getting it wrong scales every turn by a fixed factor.
+    #[serde(default = "default_game_yaw")]
+    pub game_yaw: f64,
 
     #[serde(default)]
     pub esp_port: Option<String>,
@@ -627,14 +701,27 @@ impl Config {
         if (frame_width, frame_height) != (self.screen_width, self.screen_height) {
             tracing::info!(
                 "[Config] frames arrive at {}x{} while the game renders at {}x{}; \
-                 region_* and detections are in frame pixels and mouse deltas are \
-                 scaled by {:.4}x/{:.4}y",
+                 region_* and detections are in frame pixels",
                 frame_width,
                 frame_height,
                 self.screen_width,
                 self.screen_height,
-                frame_to_screen.0,
-                frame_to_screen.1,
+            );
+        }
+
+        // `mouse_counts` projects in frame space, which is only identical to
+        // projecting in screen space when the two carry the same scale on both
+        // axes. Equal aspect ratios is exactly that condition.
+        let frame_aspect = frame_width as f64 / frame_height as f64;
+        let screen_aspect = self.screen_width as f64 / self.screen_height as f64;
+        if (frame_aspect - screen_aspect).abs() > 1e-3 {
+            tracing::warn!(
+                "[Config] frames are {frame_width}x{frame_height} ({frame_aspect:.4}) \
+                 but the game renders {}x{} ({screen_aspect:.4}); a non-uniform \
+                 scale makes the vertical aim off by {:.1}%",
+                self.screen_width,
+                self.screen_height,
+                (screen_aspect / frame_aspect - 1.) * 100.,
             );
         }
 
@@ -649,6 +736,14 @@ impl Config {
 
         if !self.game_sens.is_finite() || self.game_sens <= 0. {
             bail!("game_sens must be greater than zero");
+        }
+        // A field of view at or past 180 degrees has no finite focal length,
+        // and a non-positive yaw would make every turn infinite.
+        if !self.game_hfov.is_finite() || self.game_hfov <= 0. || self.game_hfov >= 180. {
+            bail!("game_hfov must be between zero and 180 degrees");
+        }
+        if !self.game_yaw.is_finite() || self.game_yaw <= 0. {
+            bail!("game_yaw must be greater than zero");
         }
         if !self.mouse.dpi.is_finite() || self.mouse.dpi <= 0. {
             bail!("mouse.dpi must be greater than zero");
@@ -677,6 +772,18 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// How this game maps a *frame* offset onto a view rotation; see
+    /// [`mouse_counts`]. Only meaningful after [`Self::resolve`] has filled in
+    /// the frame geometry.
+    pub fn optics(&self) -> Optics {
+        Optics {
+            width: self.frame_width as f64,
+            hfov: self.game_hfov,
+            yaw: self.game_yaw,
+            sens: self.game_sens,
+        }
     }
 
     pub fn profile(&self, index: usize) -> &Profile {
@@ -926,26 +1033,108 @@ aim_mode = "horizon"
         assert_eq!(scale, (1.0, 1.0));
     }
 
-    #[test]
-    fn mouse_counts_scale_a_frame_delta_into_screen_pixels() {
-        // 1:1 capture: the delta passes through the old formula unchanged.
-        let (dx, dy) = mouse_counts((100., -50.), (1.0, 1.0), 2.0, 800.);
-        assert!((dx - 100. * WIN_DPI_SCALE_FACTOR / 2.0 / 800.).abs() < 1e-9);
-        assert!((dy + 50. * WIN_DPI_SCALE_FACTOR / 2.0 / 800.).abs() < 1e-9);
+    fn optics(sens: f64) -> Optics {
+        Optics {
+            width: 1920.,
+            hfov: 103.,
+            yaw: 0.07,
+            sens,
+        }
+    }
 
-        // Capturing 1920 of a 2560-wide screen: a 100 px frame delta is really
-        // a 133.33 px move in the game, so it must produce more counts.
-        let scale = 2560. / 1920.;
-        let (wide, _) = mouse_counts((100., 0.), (scale, scale), 2.0, 800.);
-        assert!((wide / dx - scale).abs() < 1e-9, "{wide} vs {dx}");
+    /// Reference values from the projection this is a port of. Nothing about
+    /// the mouse enters here, which is the whole point: the game receives
+    /// counts and converts them with its own yaw constant.
+    #[test]
+    fn mouse_counts_match_the_projective_reference() {
+        assert!((optics(1.).focal() - 763.6184800011).abs() < 1e-9);
+
+        for (delta, sens, want) in [
+            ((100.0f32, -50.0f32), 2.0, (53.2909920090, -26.5330230069)),
+            ((30., 40.), 1.5, (21.4266794049, 28.5355246879)),
+            ((800., 0.), 0.38, (1741.8379715151, 0.)),
+            ((20., 0.), 0.38, (56.4021015477, 0.)),
+        ] {
+            let (dx, dy) = mouse_counts(delta, optics(sens));
+            assert!((dx - want.0).abs() < 1e-6, "{delta:?} x: {dx} vs {}", want.0);
+            assert!((dy - want.1).abs() < 1e-6, "{delta:?} y: {dy} vs {}", want.1);
+        }
+    }
+
+    /// The reason the old scale-factor form was wrong: screen pixels are a
+    /// perspective projection of the view angle, so they compress away from
+    /// the centre. A linear conversion over-turns on every long flick.
+    #[test]
+    fn counts_grow_slower_than_the_pixel_offset() {
+        let near = mouse_counts((400., 0.), optics(1.)).0;
+        let far = mouse_counts((800., 0.), optics(1.)).0;
+        let ratio = far / near;
+        assert!(
+            (ratio - 1.6759).abs() < 1e-3,
+            "twice the offset is {ratio:.4} times the turn, not 2"
+        );
+        assert!(ratio < 2., "a linear conversion would give exactly 2");
+    }
+
+    /// `mouse.dpi` describes the hand, not the game. It must not reach this.
+    #[test]
+    fn counts_do_not_depend_on_the_mouse_dpi() {
+        let src = with(TWO_PROFILES);
+        let a = Config::parse(&src.replace("[mouse]", "[mouse]\ndpi = 400.0")).unwrap();
+        let b = Config::parse(&src.replace("[mouse]", "[mouse]\ndpi = 1600.0")).unwrap();
+        assert_ne!(a.mouse.dpi, b.mouse.dpi);
+        assert_eq!(
+            mouse_counts((137., -42.), a.optics()),
+            mouse_counts((137., -42.), b.optics())
+        );
     }
 
     #[test]
     fn mouse_counts_are_symmetric_and_zero_at_the_crosshair() {
-        assert_eq!(mouse_counts((0., 0.), (1.3, 1.3), 1.5, 1000.), (0., 0.));
-        let (px, py) = mouse_counts((30., 40.), (1.3, 1.3), 1.5, 1000.);
-        let (nx, ny) = mouse_counts((-30., -40.), (1.3, 1.3), 1.5, 1000.);
+        assert_eq!(mouse_counts((0., 0.), optics(1.5)), (0., 0.));
+        let (px, py) = mouse_counts((30., 40.), optics(1.5));
+        let (nx, ny) = mouse_counts((-30., -40.), optics(1.5));
         assert!((px + nx).abs() < 1e-12 && (py + ny).abs() < 1e-12);
+    }
+
+    /// The reason `mouse_counts` needs no `frame_to_screen`: scaling the delta
+    /// into screen pixels and projecting with the screen width is the *same
+    /// angle* as projecting the frame delta with the frame width, because
+    /// `atan2` sees only the ratio and both sides carry the same factor.
+    #[test]
+    fn projecting_in_frame_space_matches_projecting_in_screen_space() {
+        let (frame, scale) = frame_geometry("elgato://", (2560, 1440), (1920, 1080));
+        let in_frame = Optics {
+            width: frame.0 as f64,
+            hfov: 103.,
+            yaw: 0.07,
+            sens: 1.5,
+        };
+        let in_screen = Optics {
+            width: 2560.,
+            ..in_frame
+        };
+        // The identity is exact in real arithmetic; what is left is the f32
+        // rounding of the scaled delta, which is relative, so the tolerance
+        // has to be too.
+        let near = |a: f64, b: f64| (a - b).abs() <= 1e-6 * a.abs().max(1.);
+        for d in [(1.0f32, 0.5f32), (137., -42.), (800., 300.), (-60., 0.)] {
+            let here = mouse_counts(d, in_frame);
+            let there = mouse_counts(
+                (d.0 * scale.0 as f32, d.1 * scale.1 as f32),
+                in_screen,
+            );
+            assert!(near(here.0, there.0), "{d:?}: {here:?} vs {there:?}");
+            assert!(near(here.1, there.1), "{d:?}: {here:?} vs {there:?}");
+        }
+    }
+
+    #[test]
+    fn a_degenerate_field_of_view_or_yaw_is_refused() {
+        for bad in ["game_hfov = 0.0", "game_hfov = 180.0", "game_yaw = 0.0"] {
+            let src = with(&format!("{bad}\n{TWO_PROFILES}"));
+            assert!(Config::parse(&src).is_err(), "{bad} was accepted");
+        }
     }
 
     /// End to end: a target at the centre of the frame is the crosshair, so it
@@ -957,13 +1146,15 @@ aim_mode = "horizon"
             ((2560, 1440), (1920, 1080)),
             ((1920, 1080), (1280, 720)),
         ] {
-            let ((frame_w, frame_h), scale) = frame_geometry("elgato://", screen, capture);
+            let ((frame_w, frame_h), _) = frame_geometry("elgato://", screen, capture);
             let crosshair = (frame_w as f32 / 2., frame_h as f32 / 2.);
             let delta = (
                 crosshair.0 - frame_w as f32 / 2.,
                 crosshair.1 - frame_h as f32 / 2.,
             );
-            assert_eq!(mouse_counts(delta, scale, 1.0, 1000.), (0., 0.));
+            let mut o = optics(1.0);
+            o.width = frame_w as f64;
+            assert_eq!(mouse_counts(delta, o), (0., 0.));
         }
     }
 

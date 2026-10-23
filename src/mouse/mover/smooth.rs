@@ -174,9 +174,8 @@ impl Mover for SmoothMover {
     /// flick with [`plan_flick`], then play it with [`SmoothMover::play`].
     ///
     /// `aim.reach_px` and `aim.width_px` are the distance to the target and
-    /// its width in screen pixels; Fitts's law needs the *visual* difficulty
-    /// of the shot, which counts do not carry. Blocks for the length of the
-    /// flick.
+    /// its width in pixels; Fitts's law needs the *visual* difficulty of the
+    /// shot, which counts do not carry. Blocks for the length of the flick.
     fn apply(
         &mut self,
         mouse: &dyn MouseDevice,
@@ -394,11 +393,14 @@ impl Tremor {
 
 /// Plan a ballistic flick toward `delta`, in mouse counts.
 ///
-/// `d_px` and `w_px` are the reach and the target width in **screen pixels**,
-/// not counts: how long a hand takes depends on the *visual* difficulty of the
-/// shot, not on the mouse's DPI. Feeding counts to Fitts would make `MOUSE_DPI`
-/// change the duration of the gesture, which is wrong physically and is
-/// exactly the sort of artefact worth not leaving behind.
+/// `d_px` and `w_px` are the reach and the target width in **pixels**, not
+/// counts: how long a hand takes depends on the *visual* difficulty of the
+/// shot. Feeding counts to Fitts would make the game's sensitivity change the
+/// duration of the gesture, which is wrong physically and is exactly the sort
+/// of artefact worth not leaving behind.
+///
+/// Only their ratio is read, so which pixel space they are in does not matter
+/// as long as it is the same one; see [`super::Aim`].
 ///
 /// The flick deliberately stops short of the target. The next frame sees what
 /// is left and plans the corrective submovement, which is what makes the
@@ -424,7 +426,7 @@ pub fn plan_flick_at(
     random: &mut impl Rng,
     now: Instant,
 ) -> Option<Flick> {
-    // `mouse_counts` divides by GAME_SENS and MOUSE_DPI. `NaN as i32`
+    // `mouse_counts` divides by the game's degrees-per-count. `NaN as i32`
     // saturates to zero rather than panicking, so an infinite delta would
     // surface as an aim that silently stops instead of as a crash.
     if !delta.0.is_finite() || !delta.1.is_finite() || !d_px.is_finite() || !w_px.is_finite() {
@@ -728,11 +730,11 @@ mod tests {
     #[test]
     fn a_stroke_of_a_few_counts_is_not_spread_over_the_whole_fitts_time() {
         let c = cfg();
-        // The shipped .env: SCREEN == CAPTURE so a frame pixel is a screen
-        // pixel, and MOUSE_DPI 1000 at GAME_SENS 1 makes a reach worth
-        // reach * 96/1000 counts. The whole 192 px region is under 13 of them.
+        // A deliberately low counts-per-pixel, of the order a wide field of
+        // view at a high sensitivity produces: the whole 192 px region is
+        // under 13 counts, so a stroke is a handful of them.
         for reach_px in [20.0f64, 40., 60., 96., 135.] {
-            let counts = reach_px * 96. / 1000.;
+            let counts = reach_px * 0.096;
             let mut state = SmoothMover::new(c, 4_000_000, 1000.);
             let mut random = StdRng::seed_from_u64(42);
             let f = plan_flick(&mut state, (counts, 0.), reach_px as f32, 20., &mut random)
@@ -752,6 +754,50 @@ mod tests {
                 "{reach_px} px: {:?} to move {counts:.2} counts",
                 f.duration
             );
+        }
+    }
+
+    /// Fitts reads only `d / W`, so scaling both by the same factor cannot
+    /// change anything. That is what lets the aim loop hand over frame pixels
+    /// directly instead of converting them to screen pixels first — the
+    /// conversion would multiply both and cancel.
+    #[test]
+    fn the_plan_does_not_depend_on_which_pixel_space_the_reach_is_measured_in() {
+        let c = cfg();
+        for (d, w) in [(35.0f64, 42.0f64), (120., 64.), (600., 20.)] {
+            // Fitts itself, in f64, at any scale at all.
+            for scale in [1.0f64, 4. / 3., 2.0, 0.5, 7.5] {
+                let plain = fitts_duration_ms(d, w, c.fitts_a_ms, c.fitts_b_ms);
+                let scaled = fitts_duration_ms(d * scale, w * scale, c.fitts_a_ms, c.fitts_b_ms);
+                assert!(
+                    (plain - scaled).abs() <= 1e-9 * plain,
+                    "scale {scale}: {plain} vs {scaled}"
+                );
+            }
+
+            // And end to end, with the same seed and a fresh state, so the
+            // pixel space is the only thing that could differ. Only powers of
+            // two here: `reach_px` is an `f32`, and a scale it cannot hold
+            // exactly perturbs the ratio in the last bits, which is enough to
+            // move the planned duration by a nanosecond or two. That is the
+            // f32 grid, not a dependence on the pixel space.
+            for scale in [0.5f64, 2.0, 4.0] {
+                let plan = |dp: f64, wp: f64| {
+                    plan_flick(
+                        &mut SmoothMover::new(c, 4_000_000, 1000.),
+                        (180., -76.),
+                        dp as f32,
+                        wp as f32,
+                        &mut StdRng::seed_from_u64(5),
+                    )
+                    .expect("a non-zero delta flicks")
+                };
+                let here = plan(d, w);
+                let there = plan(d * scale, w * scale);
+                assert_eq!(here.total, there.total, "scale {scale}");
+                assert_eq!(here.duration, there.duration, "scale {scale}");
+                assert_eq!(here.steps.len(), there.steps.len(), "scale {scale}");
+            }
         }
     }
 

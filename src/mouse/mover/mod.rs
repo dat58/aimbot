@@ -19,17 +19,24 @@ use smooth::SmoothMover;
 use std::time::{Duration, Instant};
 
 /// What the aim loop asks for: a delta in mouse counts, plus the *visual*
-/// difficulty of the shot in screen pixels.
+/// difficulty of the shot in pixels.
 ///
 /// The two are not interchangeable. How long a hand takes depends on what it
-/// can see, not on the mouse's DPI, so a movement that wants a duration needs
-/// pixels — which counts do not carry.
+/// can see, not on how many counts the turn is worth, so a movement that wants
+/// a duration needs pixels — which counts do not carry.
+///
+/// Fitts reads only the **ratio** `reach_px / width_px`, so whatever space the
+/// two are measured in cancels out of the duration entirely. They therefore
+/// arrive in frame pixels, straight from the detection, with no conversion to
+/// screen pixels on the way — that conversion would multiply both and change
+/// nothing. What does matter is that they are in the *same* space as each
+/// other.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Aim {
     pub delta: (f64, f64),
-    /// Distance to the target, in screen pixels.
+    /// Distance to the target, in frame pixels.
     pub reach_px: f32,
-    /// The target's full width, in screen pixels.
+    /// The target's full width, in the same pixels as [`Self::reach_px`].
     pub width_px: f32,
 }
 

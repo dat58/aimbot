@@ -355,7 +355,7 @@ dpi = 1000.0
 | `port` | **required** | Serial node. An empty string means "open the first box found" — Medius only |
 | `baud` | `115200` | MAKCU only; one of `115200`, `2000000`, `4000000` |
 | `listen` | `false` | Watch the physical mouse's buttons to toggle trigger / auto-aim. Ignored, with a warning, on a device that cannot read them |
-| `dpi` | `1000` | Counts per inch the mouse is actually set to. Not a knob |
+| `dpi` | `1000` | Counts per inch the mouse is actually set to. Not a knob, and **not** part of the pixel-to-counts conversion — its only use is the hand-speed envelope |
 | `render` | `despiked` | Medius only: `off`, `stock`, `despiked`, `unsmoothed` |
 | `render_full` | `false` | Medius only: render the operator's own motion too instead of relaying it untouched |
 | `lock_move` | `false` | Medius only: blank the operator's own motion around each injected move, so the two cannot add up |
@@ -457,20 +457,48 @@ predict how a setting will feel before trying it.
    or half its larger side when the crosshair is level with a head box, times
    the same `scale_min_zone`.
 
-2. **Size, in mouse counts.**
+2. **Size, in mouse counts.** Pixels are a perspective projection of the view
+   angle, so the conversion goes through the camera rather than through a
+   scale factor:
 
    ```text
-   counts = dist × frame_to_screen × 96 / game_sens / [mouse].dpi
+   focal  = (frame_width / 2) / tan(game_hfov / 2)
+   turn   = atan2(dist, focal)                  # degrees of view rotation
+   counts = turn / (game_yaw × game_sens)
    ```
 
-   `fov` therefore caps every flick. At `[mouse].dpi = 1000`, `game_sens = 1.0`,
-   a 35 px fov means no flick is ever larger than 3.4 counts.
+   The pitch uses `atan2(dy, hypot(focal, dx))` rather than `atan2(dy, focal)`,
+   because it is measured off the already-yawed ray.
+
+   This works in **frame** pixels, with no conversion to screen pixels first.
+   `atan2` sees only the ratio of its arguments, and scaling the delta to
+   screen pixels multiplies the numerator and the focal length by the same
+   factor, so the two give the identical angle:
+
+   ```text
+   screen: atan2(dx · sw/fw, (sw/2)/tan(hfov/2))  ->  dx · 2·tan(hfov/2) / fw
+   frame:  atan2(dx,         (fw/2)/tan(hfov/2))  ->  dx · 2·tan(hfov/2) / fw
+   ```
+
+   The cancellation needs the same scale on both axes, so the config warns at
+   startup if the capture's aspect ratio differs from the screen's — the only
+   way `frame_geometry` produces a non-uniform one.
+
+   **The mouse's DPI is not in this and must not be.** The game never sees it:
+   it receives counts and multiplies them by its own `game_yaw` constant. DPI
+   only decides how much *hand travel* a count is worth, which is why its one
+   use is the speed envelope below.
+
+   Because the relation is an arctangent, it compresses away from the centre:
+   at a 103° field of view a target 800 px out is worth **1.68×** the counts of
+   one 400 px out, not 2×. `fov` still caps every flick — at `game_sens = 1.0`,
+   `game_hfov = 103`, a 35 px fov means no flick exceeds 37 counts.
 
 3. **Ballistic gain.** The flick commits to `move_smooth_gain` of that, ±4.5%.
    A share `move_smooth_overshoot_p` of flicks overshoot to about 106% instead.
    What is left over is the next frame's job.
 
-4. **Duration (Fitts).** In screen pixels:
+4. **Duration (Fitts).**
 
    ```text
    W  = 2 × min_zone
@@ -478,6 +506,11 @@ predict how a setting will feel before trying it.
    ```
 
    then ±12% lognormal jitter, then clamped to `[MIN_MS, MAX_MS]`.
+
+   `dist` and `W` are frame pixels, straight from the detection. Only their
+   **ratio** is read, so whichever pixel space they are measured in cancels —
+   converting both to screen pixels first would multiply both and change
+   nothing. All that matters is that they share a space.
 
 5. **Reports.** `MT × poll_hz / 1000` of them (at least 2, at most 512), one
    every `1 / poll_hz`. Only reports that actually move are written to the
@@ -493,20 +526,22 @@ smooth  ≈ 0.9 × fov / MT   px/s
 bezier  ≈ fov × fps        px/s
 ```
 
-**Worked example** — `fov = 35`, `[mouse].dpi = 1000`, `game_sens = 1.0`,
-`[mouse].baud = 4000000`, a target whose `min_zone` is 21 px:
+**Worked example** — `fov = 35`, `game_sens = 1.0`, `game_hfov = 103`,
+`game_yaw = 0.07`, frames arriving at 1920 wide, `[mouse].baud = 4000000`, a
+target whose `min_zone` is 21 px:
 
 | Step | Value |
 | --- | --- |
-| counts | 35 × 96 / 1000 = **3.36** |
+| focal | 960 / tan(51.5°) = **763.6 px** |
+| turn | atan2(35, 763.6) = 2.625° |
+| counts | 2.625 / (0.07 × 1.0) = **37.5** |
 | W, index of difficulty | 42 px, log2(70 / 42 + 1) = 1.42 bits |
-| MT | 35 + 55 × 1.42 ≈ **113 ms** |
-| reports at 1000 Hz | 113, of which about **3** are written — 60 bytes, 0.13% of the link |
-| tracking | 0.9 × 35 / 0.113 ≈ **280 px/s**, against 2100 px/s for bezier at 60 fps |
+| Fitts MT | 35 + 55 × 1.42 ≈ 113 ms |
+| MT after jitter and the speed envelope | **54 ms** |
+| reports at 1000 Hz | **16**, all of them written at ~2.3 counts each — 288 bytes, 1.3% of the link |
+| tracking | 0.9 × 35 / 0.054 ≈ **580 px/s**, against 2100 px/s for bezier at 60 fps |
 
-That last line is the one that matters at a tight fov: the default timing is
-calibrated for full flicks, and it makes corrections ten times slower than
-bezier. The [tight-fov preset](#presets) fixes most of that.
+Every number above is produced by the code, not by hand.
 
 ### Settings
 
@@ -537,22 +572,38 @@ badly wrong for an in-region correction, which is a handful.
 
 Fitts's index of difficulty is a *ratio* of distance to width, so it is the same
 for a 5-count flick and a 5000-count one and says nothing about how far the hand
-moves. `counts / dpi` does — it is inches. The speed envelope is expressed
-in inches precisely so it holds at any `[mouse].dpi` and `game_sens` without
-retuning, since neither is a knob you get to pick.
+moves. `counts / dpi` does — it is inches. **This is the only place `[mouse].dpi`
+is used.** It does not enter the pixel-to-counts conversion, because the game
+never sees it; it only answers "how far did the hand actually travel", which is
+what makes a speed envelope in inches meaningful.
+
+The envelope is expressed in inches precisely so it holds at any `[mouse].dpi`
+and `game_sens` without retuning, since neither is a knob you get to pick.
 
 Fitts describes *aimed* reaches, where landing accurately is the cost. A
 correction far too small for that just travels at the hand's comfortable speed,
 which makes its duration proportional to its length — Fitts's law is known to
 flatten out at very low indices of difficulty for the same reason.
 
-Measured at `game_sens = 0.38`, `[mouse].dpi = 1000` on a real MAKCU:
+Computed at `game_hfov = 103`, `game_yaw = 0.07`, frames 1920 wide,
+`min_zone = 10 px`, all other settings at their defaults:
 
-| Reach | Counts | Reports | Duration |
-| --- | --- | --- | --- |
-| 20 px | 1.92 | 2 | 2.7 ms |
-| 60 px | 5.76 | 3 | 9.8 ms |
-| 135 px | 12.96 | 6 | 19.9 ms |
+| Reach | Counts | Reports | Duration | at `game_sens = 1.0` |
+| --- | --- | --- | --- | --- |
+| 20 px | 56.4 | 24 | 81 ms | 21.4 counts, 9 reports, 31 ms |
+| 60 px | 168.9 | 73 | 188 ms | 64.2 counts, 28 reports, 93 ms |
+| 135 px | 376.9 | 163 | 246 ms | 143.2 counts, 62 reports, 207 ms |
+
+Fitts asks for 122 / 189 / 247 ms at these reaches. The 60 px and 135 px rows
+land on that almost exactly; the 20 px row is still cut short by
+`min_speed_ips` (56 counts at 1000 dpi is 0.056 in, which at 0.6 in/s cannot
+take longer than 94 ms). So **the envelope still sets the duration on the
+shortest corrections and Fitts takes over from roughly 60 px up** — which is
+the division of labour it was designed for.
+
+Under the old pixel-proportional conversion the same corrections were worth a
+tenth of the counts, so the envelope capped *everything* and flicks came out
+about ten times too short.
 
 #### Accuracy
 
@@ -660,8 +711,15 @@ flick lasts. What matters is how many counts a flick carries against how many
 slots it gets, so work out the largest flick first:
 
 ```text
-max counts = fov × frame_to_screen × 96 / game_sens / [mouse].dpi
+max counts = atan2(fov, focal) / (game_yaw × game_sens)
 ```
+
+| `fov` | at `game_sens = 1.0` | at `game_sens = 0.38` |
+| --- | --- | --- |
+| 35 px | 37 counts | 99 counts |
+| 50 px | 54 counts | 141 counts |
+| 120 px | 128 counts | 336 counts |
+| 192 px | 202 counts | 531 counts |
 
 - **Up to ~4 counts:** `250` is free — same timing on the wire as 1000 Hz, four
   times fewer thread wake-ups. At 2M and 4M the automatic choice is 1000 Hz, so
@@ -746,10 +804,16 @@ the range of `min_zone` a target actually produces:
 
 | | Tight fov | Default |
 | --- | --- | --- |
-| `MT` | 39–66 ms | 98–166 ms |
-| Reports scheduled | 10–17 | 98–166 |
-| Commands written | 1–3 | 1–3.5 |
-| Tracking | 240–700 px/s | 95–280 px/s |
+| `MT` | 38–54 ms | 54 ms |
+| Reports scheduled | 16 | 16 |
+| Tracking | 583–823 px/s | 583 px/s |
+
+The default row is flat because at this fov and sensitivity
+`move_smooth_min_speed_ips = 0.6` caps `MT` at 62 ms whatever Fitts asks, so
+widening `W` changes nothing. That also means **the tight preset buys much less
+than it used to here** — 38 ms against 54, not 39 against 98. Before reaching
+for it, try lowering `move_smooth_min_speed_ips` instead; at a tight fov it,
+not Fitts, is what you are actually fighting.
 
 Be clear about what the tight-fov preset gives up. A person takes roughly
 80–150 ms over a 10–35 px correction, so 39–66 ms is *faster than a hand*. The
@@ -760,10 +824,11 @@ every strafing target.
 
 ### Tuning procedure
 
-1. **Get `[mouse].dpi` and `game_sens` right first.** Every flick is sized in
-   counts derived from them, so a wrong value makes each one the wrong size and
-   no smooth setting can compensate. Both must be above zero; startup fails
-   otherwise.
+1. **Get `game_sens`, `game_hfov` and `game_yaw` right first.** Every flick is
+   sized in counts derived from them, so a wrong value makes each one the wrong
+   size and no smooth setting can compensate. `[mouse].dpi` matters too, but
+   only for the speed envelope — it does not change how far a flick goes. All
+   must be above zero; startup fails otherwise.
 2. **Pick a preset from your fov.**
 3. **Check the device keeps up.** Run `mouse_test`, type `s` at the `dx`
    prompt to switch paths, and compare the planned duration with the measured
@@ -830,6 +895,9 @@ CPU build no longer needs TensorRT settings to start.
 | `region_width` / `region_height` | `0` / `0` | Detection region size. Cropping happens only when this differs from the screen size |
 | `intra_threads` | `1` | ONNX Runtime intra-op threads |
 | `default_aim_mode` | unset | `0` head, `1` neck, `2` chest, `3` abdomen, `4` horizon |
+| `game_sens` | `1.0` | In-game sensitivity, exactly as typed into the game |
+| `game_hfov` | `103.0` | Horizontal field of view in degrees, at the rendered aspect ratio. Applied to the *frame* width, which covers the same view |
+| `game_yaw` | `0.07` | Degrees of view rotation per mouse count at sensitivity 1 — the engine's own constant |
 | `RUST_LOG` (env) | `info` | e.g. `info,aimbot=debug` for per-stage timings |
 
 ### Profiles
@@ -910,8 +978,15 @@ neither is a fact about the mouse:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `game_sens` | `1.0` | In-game sensitivity |
+| `game_sens` | `1.0` | In-game sensitivity, exactly as typed into the game |
+| `game_hfov` | `103.0` | Horizontal field of view in degrees |
+| `game_yaw` | `0.07` | Degrees of view rotation per count at sensitivity 1 |
 | `esp_port` | unset | Serial port of the ESP button board |
+
+`game_hfov` and `game_yaw` have to match the game or every turn is off by a
+fixed factor. `game_yaw` is the engine constant — `m_yaw` in Source-derived
+engines, `0.022` there — not something to tune by feel. Both are refused at
+startup if non-positive, and `game_hfov` must be under 180°.
 
 ### Human-flick movement
 

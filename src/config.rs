@@ -83,8 +83,10 @@ pub enum AimModel {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Optics {
     pub model: AimModel,
-    /// The game's render width. Both models normalise by it, and they only
-    /// agree with each other when they use the same one.
+    /// Width of the space the delta is measured in — the frame, which covers
+    /// the whole screen and therefore the whole field of view. Both models
+    /// normalise by it, and they only agree with each other when they use the
+    /// same one.
     pub width: f64,
     /// Horizontal field of view in degrees, at the rendered aspect ratio.
     pub hfov: f64,
@@ -92,6 +94,16 @@ pub struct Optics {
     pub yaw: f64,
     /// The in-game sensitivity setting, as typed into the game.
     pub sens: f64,
+    /// Measured correction on top of whichever model, applied last.
+    ///
+    /// Both models carry a constant taken from a *different* game —
+    /// [`LINEAR_K`] was fitted elsewhere, and `game_yaw` defaults to a value
+    /// out of a reference snippet. Neither can be verified from here, and
+    /// getting either wrong scales every turn by a fixed factor. This is the
+    /// one number that can be measured in the game actually being played:
+    /// halve it while the aim sails past, double it while the aim falls
+    /// short, and the value it settles on *is* the measurement.
+    pub scale: f64,
 }
 
 impl Optics {
@@ -105,7 +117,7 @@ impl Optics {
         self.yaw * self.sens
     }
 
-    /// Counts per pixel for [`AimModel::Linear`].
+    /// Counts per pixel for [`AimModel::Linear`], before [`Self::scale`].
     pub fn linear_scale(&self) -> f64 {
         let sens = self.sens.clamp(SENS_CLAMP.0, SENS_CLAMP.1);
         REF_WIDTH / self.width * LINEAR_K * sens.powf(LINEAR_EXP)
@@ -125,19 +137,23 @@ impl Optics {
 /// out, not 2. Inside a typical `fov` the two stay within about a percent of
 /// each other — the bend only shows on long flicks.
 ///
-/// # Which width
+/// # Which width, and why `aim_scale` exists
 ///
-/// The delta arrives in **frame** pixels but both models normalise by
-/// [`Optics::width`], which is the **screen** width. That is deliberate and
-/// it is what matches the game: taking the frame width instead over-turns by
-/// `screen_width / frame_width`, which on a 2560-wide screen captured at 1920
-/// is 1.33 and is visible as the aim sailing past its target. The reference
-/// implementation this is ported from normalises the same way, by the
-/// monitor's width rather than the capture's.
+/// The delta is in frame pixels and [`Optics::width`] is the frame width.
+/// That pairing is the self-consistent one: the capture carries the whole
+/// screen, so the frame spans the whole field of view, and the projection
+/// only cares that the delta and the width describe the same space.
+///
+/// What neither model can get right on its own is the *constant*. The linear
+/// fit was taken in another game and `game_yaw` defaults to a value out of a
+/// reference snippet; both scale every turn by a fixed factor when they do
+/// not match. [`Optics::scale`] is the measured correction for exactly that,
+/// and it is the only one of these numbers that can be established in the
+/// game being played rather than looked up.
 pub fn mouse_counts(frame_delta: (f32, f32), optics: Optics) -> (f64, f64) {
     let dx = frame_delta.0 as f64;
     let dy = frame_delta.1 as f64;
-    match optics.model {
+    let (cx, cy) = match optics.model {
         AimModel::Linear => {
             let scale = optics.linear_scale();
             (dx * scale, dy * scale)
@@ -153,7 +169,8 @@ pub fn mouse_counts(frame_delta: (f32, f32), optics: Optics) -> (f64, f64) {
             let deg_per_count = optics.deg_per_count();
             (yaw_deg / deg_per_count, pitch_deg / deg_per_count)
         }
-    }
+    };
+    (cx * optics.scale, cy * optics.scale)
 }
 
 /// Report cadence for the smooth-aim playback, derived from the link speed.
@@ -563,6 +580,9 @@ fn default_game_hfov() -> f64 {
 fn default_game_yaw() -> f64 {
     0.07
 }
+fn default_aim_scale() -> f64 {
+    1.
+}
 fn enabled() -> bool {
     true
 }
@@ -706,6 +726,10 @@ pub struct Config {
     /// and `game_yaw` are read only by `projective`.
     #[serde(default)]
     pub aim_model: AimModel,
+    /// Measured multiplier on every move; see [`Optics::scale`]. Start at `1`
+    /// and halve or double it in game until the aim lands.
+    #[serde(default = "default_aim_scale")]
+    pub aim_scale: f64,
 
     #[serde(default)]
     pub esp_port: Option<String>,
@@ -786,6 +810,9 @@ impl Config {
         if !self.game_yaw.is_finite() || self.game_yaw <= 0. {
             bail!("game_yaw must be greater than zero");
         }
+        if !self.aim_scale.is_finite() || self.aim_scale <= 0. {
+            bail!("aim_scale must be greater than zero");
+        }
         if !self.mouse.dpi.is_finite() || self.mouse.dpi <= 0. {
             bail!("mouse.dpi must be greater than zero");
         }
@@ -821,10 +848,11 @@ impl Config {
     pub fn optics(&self) -> Optics {
         Optics {
             model: self.aim_model,
-            width: self.screen_width as f64,
+            width: self.frame_width as f64,
             hfov: self.game_hfov,
             yaw: self.game_yaw,
             sens: self.game_sens,
+            scale: self.aim_scale,
         }
     }
 
@@ -1082,6 +1110,31 @@ aim_mode = "horizon"
             hfov: 103.,
             yaw: 0.07,
             sens,
+            scale: 1.,
+        }
+    }
+
+    /// The one knob that can be measured in the game actually being played,
+    /// so it has to reach both models and nothing else may swallow it.
+    #[test]
+    fn aim_scale_multiplies_whichever_model_is_in_use() {
+        for model in [AimModel::Linear, AimModel::Projective] {
+            let mut one = optics(0.38);
+            one.model = model;
+            let mut quarter = one;
+            quarter.scale = 0.25;
+            let (ax, ay) = mouse_counts((137., -42.), one);
+            let (bx, by) = mouse_counts((137., -42.), quarter);
+            assert!((bx - ax * 0.25).abs() < 1e-9, "{model:?}: {bx} vs {ax}");
+            assert!((by - ay * 0.25).abs() < 1e-9, "{model:?}: {by} vs {ay}");
+        }
+    }
+
+    #[test]
+    fn a_non_positive_aim_scale_is_refused() {
+        for bad in ["aim_scale = 0.0", "aim_scale = -2.0"] {
+            let src = with(&format!("{bad}\n{TWO_PROFILES}"));
+            assert!(Config::parse(&src).is_err(), "{bad} was accepted");
         }
     }
 
@@ -1220,6 +1273,7 @@ aim_mode = "horizon"
             hfov: 103.,
             yaw: 0.07,
             sens: 1.5,
+            scale: 1.,
         };
         let in_screen = Optics {
             width: 2560.,

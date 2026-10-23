@@ -39,6 +39,11 @@ openvino_device_type = "CPU"
 intra_threads = 1
 
 game_sens = 0.38
+# linear = hằng số fit sẵn, chỉ cần game_sens.
+# projective = phép chiếu camera, cần thêm game_hfov + game_yaw.
+aim_model = "linear"
+# game_hfov = 103.0
+# game_yaw = 0.07
 
 default_aim_mode = 4
 

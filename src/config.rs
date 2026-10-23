@@ -44,6 +44,36 @@ pub fn frame_geometry(
     (frame, scale)
 }
 
+/// Width the linear model's constant was fitted at, and the width the
+/// projective model's focal length is derived from.
+pub const REF_WIDTH: f64 = 1920.;
+/// Counts per reference pixel at sensitivity 1, fitted in-game.
+pub const LINEAR_K: f64 = 1.07437623;
+/// Exponent of the fitted sensitivity curve. Within a percent of `-1`, which
+/// is what the physics says it should be.
+pub const LINEAR_EXP: f64 = -0.9936827126;
+/// Sensitivities the fit is valid over.
+pub const SENS_CLAMP: (f64, f64) = (0.01, 10.);
+
+/// How a pixel offset is turned into a turn.
+///
+/// The two agree to about a percent over sensitivities 0.25-2 and offsets up
+/// to 100 px — worst measured 1.23%, at sensitivity 2 and 100 px — and only
+/// part company further out, where [`AimModel::Projective`] bends and
+/// [`AimModel::Linear`] does not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AimModel {
+    /// One fitted constant over the sensitivity, normalised to a 1920-wide
+    /// reference. Needs no field of view and no engine yaw constant, which is
+    /// why it is the default: those are two more things to get wrong.
+    #[default]
+    Linear,
+    /// The pinhole projection. Physically the honest one, and it needs
+    /// [`Config::game_hfov`] and [`Config::game_yaw`] to match the game.
+    Projective,
+}
+
 /// How the game turns mouse counts into a view rotation.
 ///
 /// Everything here is a fact about the game, not about the mouse. The mouse's
@@ -52,9 +82,9 @@ pub fn frame_geometry(
 /// given turn is worth cannot depend on the hardware.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Optics {
-    /// Width of the space the delta is measured in — the frame, since that is
-    /// what detections are in. The projection is scale-free, so this only has
-    /// to agree with whatever `mouse_counts` is handed; see there.
+    pub model: AimModel,
+    /// The game's render width. Both models normalise by it, and they only
+    /// agree with each other when they use the same one.
     pub width: f64,
     /// Horizontal field of view in degrees, at the rendered aspect ratio.
     pub hfov: f64,
@@ -74,50 +104,56 @@ impl Optics {
     pub fn deg_per_count(&self) -> f64 {
         self.yaw * self.sens
     }
+
+    /// Counts per pixel for [`AimModel::Linear`].
+    pub fn linear_scale(&self) -> f64 {
+        let sens = self.sens.clamp(SENS_CLAMP.0, SENS_CLAMP.1);
+        REF_WIDTH / self.width * LINEAR_K * sens.powf(LINEAR_EXP)
+    }
 }
 
 /// Mouse counts for a target `frame_delta` pixels from the crosshair.
 ///
-/// Pixels are **not** proportional to view angle. The camera is a pinhole
-/// projection, so a target twice as far off centre is well under twice the
-/// turn — at a 103° horizontal field of view, 800 px is 1.68 times the
-/// rotation of 400 px, not 2. Treating the relation as a scale factor
-/// therefore overshoots, and overshoots worse the further out the target is.
+/// Which relation is used is [`Optics::model`]'s to decide. Neither involves
+/// `mouse.dpi`: the game never sees it, so how many counts a turn is worth
+/// cannot depend on the hardware. Its one legitimate use is the hand-speed
+/// envelope in [`crate::mouse::mover::smooth`].
 ///
-/// The turn is then divided by degrees-per-count, which is where the game's
-/// sensitivity enters. `mouse.dpi` does not appear anywhere in this: it
-/// describes the hand, not the game, and its one legitimate use is the
-/// hand-speed envelope in [`crate::mouse::mover::smooth`].
+/// [`AimModel::Linear`] is one fitted constant over the sensitivity.
+/// [`AimModel::Projective`] goes through the camera, so it bends: at a 103°
+/// field of view a target 800 px out is 1.68 times the turn of one 400 px
+/// out, not 2. Inside a typical `fov` the two stay within about a percent of
+/// each other — the bend only shows on long flicks.
 ///
-/// # Why no scaling to screen pixels
+/// # Which width
 ///
-/// `atan2` depends only on the ratio of its arguments, and scaling the delta
-/// into screen pixels multiplies the numerator and the focal length by the
-/// same factor:
-///
-/// ```text
-/// screen: atan2(dx · sw/fw, (sw/2)/tan(hfov/2))  ->  dx · 2·tan(hfov/2) / fw
-/// frame:  atan2(dx,         (fw/2)/tan(hfov/2))  ->  dx · 2·tan(hfov/2) / fw
-/// ```
-///
-/// The pitch cancels the same way, because
-/// `hypot((sw/2)/tan, dx·sw/fw) == (sw/fw) · hypot((fw/2)/tan, dx)`. So the
-/// delta is projected in frame space with [`Optics::width`] set to the frame
-/// width, which is one scaling fewer for the same answer. The cancellation
-/// needs the scale to be the same on both axes — [`Config::resolve`] warns if
-/// the capture's aspect ratio differs from the screen's, which is the only way
-/// `frame_geometry` produces a non-uniform one.
+/// The delta arrives in **frame** pixels but both models normalise by
+/// [`Optics::width`], which is the **screen** width. That is deliberate and
+/// it is what matches the game: taking the frame width instead over-turns by
+/// `screen_width / frame_width`, which on a 2560-wide screen captured at 1920
+/// is 1.33 and is visible as the aim sailing past its target. The reference
+/// implementation this is ported from normalises the same way, by the
+/// monitor's width rather than the capture's.
 pub fn mouse_counts(frame_delta: (f32, f32), optics: Optics) -> (f64, f64) {
     let dx = frame_delta.0 as f64;
     let dy = frame_delta.1 as f64;
-    let focal = optics.focal();
-    let yaw_deg = dx.atan2(focal).to_degrees();
-    // The pitch is measured off the already-yawed ray, so its lever arm is
-    // `hypot(focal, dx)` rather than `focal`. Using `focal` would under-rotate
-    // y for any target that is also off centre horizontally.
-    let pitch_deg = dy.atan2(focal.hypot(dx)).to_degrees();
-    let deg_per_count = optics.deg_per_count();
-    (yaw_deg / deg_per_count, pitch_deg / deg_per_count)
+    match optics.model {
+        AimModel::Linear => {
+            let scale = optics.linear_scale();
+            (dx * scale, dy * scale)
+        }
+        AimModel::Projective => {
+            let focal = optics.focal();
+            let yaw_deg = dx.atan2(focal).to_degrees();
+            // The pitch is measured off the already-yawed ray, so its lever
+            // arm is `hypot(focal, dx)` rather than `focal`. Using `focal`
+            // would under-rotate y for any target also off centre
+            // horizontally.
+            let pitch_deg = dy.atan2(focal.hypot(dx)).to_degrees();
+            let deg_per_count = optics.deg_per_count();
+            (yaw_deg / deg_per_count, pitch_deg / deg_per_count)
+        }
+    }
 }
 
 /// Report cadence for the smooth-aim playback, derived from the link speed.
@@ -666,6 +702,10 @@ pub struct Config {
     /// match the game; getting it wrong scales every turn by a fixed factor.
     #[serde(default = "default_game_yaw")]
     pub game_yaw: f64,
+    /// Which relation turns pixels into counts; see [`AimModel`]. `game_hfov`
+    /// and `game_yaw` are read only by `projective`.
+    #[serde(default)]
+    pub aim_model: AimModel,
 
     #[serde(default)]
     pub esp_port: Option<String>,
@@ -709,9 +749,10 @@ impl Config {
             );
         }
 
-        // `mouse_counts` projects in frame space, which is only identical to
-        // projecting in screen space when the two carry the same scale on both
-        // axes. Equal aspect ratios is exactly that condition.
+        // The delta arrives in frame pixels and both aim models scale x and y
+        // by the same factor. That is only right when a frame pixel is the
+        // same fraction of the screen on both axes, which is equal aspect
+        // ratios.
         let frame_aspect = frame_width as f64 / frame_height as f64;
         let screen_aspect = self.screen_width as f64 / self.screen_height as f64;
         if (frame_aspect - screen_aspect).abs() > 1e-3 {
@@ -779,7 +820,8 @@ impl Config {
     /// the frame geometry.
     pub fn optics(&self) -> Optics {
         Optics {
-            width: self.frame_width as f64,
+            model: self.aim_model,
+            width: self.screen_width as f64,
             hfov: self.game_hfov,
             yaw: self.game_yaw,
             sens: self.game_sens,
@@ -1035,10 +1077,76 @@ aim_mode = "horizon"
 
     fn optics(sens: f64) -> Optics {
         Optics {
+            model: AimModel::Projective,
             width: 1920.,
             hfov: 103.,
             yaw: 0.07,
             sens,
+        }
+    }
+
+    fn linear(sens: f64, width: f64) -> Optics {
+        Optics {
+            model: AimModel::Linear,
+            width,
+            sens,
+            ..optics(sens)
+        }
+    }
+
+    /// Reference values from the implementation this is ported from:
+    /// `capture_px × (1920 / monitor_width) × 1.07437623 × sens^-0.9936827126`.
+    #[test]
+    fn the_linear_model_matches_its_reference_fit() {
+        for (delta, sens, width, want) in [
+            ((100.0f32, 0.0f32), 2.0, 1920., 53.9545517204),
+            ((30., 0.), 1.5, 1920., 21.5426341466),
+            ((20., 0.), 0.38, 1920., 56.2015330751),
+            ((100., 0.), 0.38, 2560., 210.7557490317),
+            ((1., 0.), 1.0, 1920., 1.0743762300),
+        ] {
+            let (dx, _) = mouse_counts(delta, linear(sens, width));
+            assert!((dx - want).abs() < 1e-6, "{delta:?} @ {sens}: {dx} vs {want}");
+        }
+    }
+
+    /// The fit is only valid over the sensitivities it was taken at, and
+    /// `powf` of a wild value would otherwise send the aim to the moon.
+    #[test]
+    fn the_linear_model_clamps_the_sensitivity_to_its_fitted_range() {
+        let px = (10.0f32, 0.0f32);
+        assert_eq!(
+            mouse_counts(px, linear(0.001, 1920.)),
+            mouse_counts(px, linear(SENS_CLAMP.0, 1920.))
+        );
+        assert_eq!(
+            mouse_counts(px, linear(99., 1920.)),
+            mouse_counts(px, linear(SENS_CLAMP.1, 1920.))
+        );
+    }
+
+    /// The fitted constant is the projection linearised: both describe the
+    /// same camera, so inside a typical `fov` they have to agree. They only
+    /// part company further out, where one bends and the other does not.
+    #[test]
+    fn the_two_models_agree_near_the_centre_and_diverge_far_from_it() {
+        for sens in [0.25f64, 0.38, 1.0, 2.0] {
+            for px in [5.0f32, 20., 50., 100.] {
+                let a = mouse_counts((px, 0.), linear(sens, 1920.)).0;
+                let b = mouse_counts((px, 0.), optics(sens)).0;
+                // Worst measured over this grid is 1.23%, at sensitivity 2
+                // and 100 px: the fitted sensitivity curve and the projection
+                // are not the same function, only close over the range that
+                // matters.
+                assert!(
+                    (a - b).abs() <= 0.02 * a,
+                    "{px} px @ {sens}: linear {a}, projective {b}"
+                );
+            }
+            // Far out the projection bends away and the fit does not follow.
+            let a = mouse_counts((800., 0.), linear(sens, 1920.)).0;
+            let b = mouse_counts((800., 0.), optics(sens)).0;
+            assert!(b < 0.8 * a, "{sens}: linear {a}, projective {b}");
         }
     }
 
@@ -1097,14 +1205,17 @@ aim_mode = "horizon"
         assert!((px + nx).abs() < 1e-12 && (py + ny).abs() < 1e-12);
     }
 
-    /// The reason `mouse_counts` needs no `frame_to_screen`: scaling the delta
-    /// into screen pixels and projecting with the screen width is the *same
-    /// angle* as projecting the frame delta with the frame width, because
-    /// `atan2` sees only the ratio and both sides carry the same factor.
+    /// The projection is scale-free: measuring the delta in another pixel
+    /// space and taking the width from that same space gives the identical
+    /// angle, because `atan2` sees only the ratio and both sides carry the
+    /// same factor. What that does **not** license is mixing the two — a
+    /// frame delta against a screen width is a different answer, which is the
+    /// bug this note exists to warn about.
     #[test]
-    fn projecting_in_frame_space_matches_projecting_in_screen_space() {
+    fn the_projection_is_free_of_the_pixel_space_when_both_sides_agree() {
         let (frame, scale) = frame_geometry("elgato://", (2560, 1440), (1920, 1080));
         let in_frame = Optics {
+            model: AimModel::Projective,
             width: frame.0 as f64,
             hfov: 103.,
             yaw: 0.07,

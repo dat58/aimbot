@@ -457,12 +457,22 @@ predict how a setting will feel before trying it.
    or half its larger side when the crosshair is level with a head box, times
    the same `scale_min_zone`.
 
-2. **Size, in mouse counts.** Pixels are a perspective projection of the view
-   angle, so the conversion goes through the camera rather than through a
-   scale factor:
+2. **Size, in mouse counts.** `aim_model` picks the relation.
+
+   **`linear`** (the default) is one constant fitted in game, normalised to a
+   1920-wide reference:
 
    ```text
-   focal  = (frame_width / 2) / tan(game_hfov / 2)
+   counts = dist × (1920 / screen_width) × 1.07437623 × game_sens^-0.9936827126
+   ```
+
+   It needs no field of view and no engine yaw constant, which is why it is
+   the default — those are two more things to get wrong.
+
+   **`projective`** goes through the camera instead:
+
+   ```text
+   focal  = (screen_width / 2) / tan(game_hfov / 2)
    turn   = atan2(dist, focal)                  # degrees of view rotation
    counts = turn / (game_yaw × game_sens)
    ```
@@ -470,29 +480,22 @@ predict how a setting will feel before trying it.
    The pitch uses `atan2(dy, hypot(focal, dx))` rather than `atan2(dy, focal)`,
    because it is measured off the already-yawed ray.
 
-   This works in **frame** pixels, with no conversion to screen pixels first.
-   `atan2` sees only the ratio of its arguments, and scaling the delta to
-   screen pixels multiplies the numerator and the focal length by the same
-   factor, so the two give the identical angle:
+   The two agree to about a percent over sensitivities 0.25–2 at offsets up to
+   100 px, and part company further out: at a 103° field of view a target
+   800 px out is **1.68×** the turn of one 400 px out under `projective`, and
+   exactly 2× under `linear`. The fitted constant `1.07437623` *is* the
+   projection linearised — `degrees(atan(1/focal)) / 0.07` at 1920 px and 103°
+   comes out at 1.0719.
 
-   ```text
-   screen: atan2(dx · sw/fw, (sw/2)/tan(hfov/2))  ->  dx · 2·tan(hfov/2) / fw
-   frame:  atan2(dx,         (fw/2)/tan(hfov/2))  ->  dx · 2·tan(hfov/2) / fw
-   ```
+   **Both normalise by `screen_width`**, while `dist` arrives in frame pixels.
+   Using the frame width instead over-turns by `screen_width / frame_width` —
+   1.33 on a 2560-wide screen captured at 1920, which is plainly visible as
+   the aim sailing past its target.
 
-   The cancellation needs the same scale on both axes, so the config warns at
-   startup if the capture's aspect ratio differs from the screen's — the only
-   way `frame_geometry` produces a non-uniform one.
-
-   **The mouse's DPI is not in this and must not be.** The game never sees it:
-   it receives counts and multiplies them by its own `game_yaw` constant. DPI
-   only decides how much *hand travel* a count is worth, which is why its one
-   use is the speed envelope below.
-
-   Because the relation is an arctangent, it compresses away from the centre:
-   at a 103° field of view a target 800 px out is worth **1.68×** the counts of
-   one 400 px out, not 2×. `fov` still caps every flick — at `game_sens = 1.0`,
-   `game_hfov = 103`, a 35 px fov means no flick exceeds 37 counts.
+   **The mouse's DPI is in neither and must not be.** The game never sees it:
+   it receives counts and converts them itself. DPI only decides how much
+   *hand travel* a count is worth, which is why its one use is the speed
+   envelope below.
 
 3. **Ballistic gain.** The flick commits to `move_smooth_gain` of that, ±4.5%.
    A share `move_smooth_overshoot_p` of flicks overshoot to about 106% instead.
@@ -711,15 +714,19 @@ flick lasts. What matters is how many counts a flick carries against how many
 slots it gets, so work out the largest flick first:
 
 ```text
-max counts = atan2(fov, focal) / (game_yaw × game_sens)
+max counts = fov × (1920 / screen_width) × 1.07437623 × game_sens^-0.9936827126
 ```
+
+At `screen_width = 1920`:
 
 | `fov` | at `game_sens = 1.0` | at `game_sens = 0.38` |
 | --- | --- | --- |
-| 35 px | 37 counts | 99 counts |
+| 35 px | 38 counts | 98 counts |
 | 50 px | 54 counts | 141 counts |
-| 120 px | 128 counts | 336 counts |
-| 192 px | 202 counts | 531 counts |
+| 120 px | 129 counts | 337 counts |
+| 192 px | 206 counts | 540 counts |
+
+Divide by `screen_width / 1920` for a wider screen.
 
 - **Up to ~4 counts:** `250` is free — same timing on the wire as 1000 Hz, four
   times fewer thread wake-ups. At 2M and 4M the automatic choice is 1000 Hz, so
@@ -824,11 +831,12 @@ every strafing target.
 
 ### Tuning procedure
 
-1. **Get `game_sens`, `game_hfov` and `game_yaw` right first.** Every flick is
-   sized in counts derived from them, so a wrong value makes each one the wrong
-   size and no smooth setting can compensate. `[mouse].dpi` matters too, but
-   only for the speed envelope — it does not change how far a flick goes. All
-   must be above zero; startup fails otherwise.
+1. **Get `game_sens` right first**, and `game_hfov` / `game_yaw` too if you
+   switch to `aim_model = "projective"`. Every flick is sized in counts derived
+   from them, so a wrong value makes each one the wrong size and no smooth
+   setting can compensate. `[mouse].dpi` matters too, but only for the speed
+   envelope — it does not change how far a flick goes. All must be above zero;
+   startup fails otherwise.
 2. **Pick a preset from your fov.**
 3. **Check the device keeps up.** Run `mouse_test`, type `s` at the `dx`
    prompt to switch paths, and compare the planned duration with the measured
@@ -896,8 +904,9 @@ CPU build no longer needs TensorRT settings to start.
 | `intra_threads` | `1` | ONNX Runtime intra-op threads |
 | `default_aim_mode` | unset | `0` head, `1` neck, `2` chest, `3` abdomen, `4` horizon |
 | `game_sens` | `1.0` | In-game sensitivity, exactly as typed into the game |
-| `game_hfov` | `103.0` | Horizontal field of view in degrees, at the rendered aspect ratio. Applied to the *frame* width, which covers the same view |
-| `game_yaw` | `0.07` | Degrees of view rotation per mouse count at sensitivity 1 — the engine's own constant |
+| `game_hfov` | `103.0` | Horizontal field of view in degrees. Read only by `aim_model = "projective"` |
+| `game_yaw` | `0.07` | Degrees of view rotation per mouse count at sensitivity 1 — the engine's own constant. Read only by `aim_model = "projective"` |
+| `aim_model` | `linear` | `linear` for the fitted constant, `projective` for the camera projection |
 | `RUST_LOG` (env) | `info` | e.g. `info,aimbot=debug` for per-stage timings |
 
 ### Profiles
@@ -979,14 +988,16 @@ neither is a fact about the mouse:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `game_sens` | `1.0` | In-game sensitivity, exactly as typed into the game |
-| `game_hfov` | `103.0` | Horizontal field of view in degrees |
-| `game_yaw` | `0.07` | Degrees of view rotation per count at sensitivity 1 |
+| `aim_model` | `linear` | `linear` or `projective`; see [Mouse movement](#from-a-detection-to-a-flick) |
+| `game_hfov` | `103.0` | Horizontal field of view in degrees. `projective` only |
+| `game_yaw` | `0.07` | Degrees of view rotation per count at sensitivity 1. `projective` only |
 | `esp_port` | unset | Serial port of the ESP button board |
 
-`game_hfov` and `game_yaw` have to match the game or every turn is off by a
-fixed factor. `game_yaw` is the engine constant — `m_yaw` in Source-derived
-engines, `0.022` there — not something to tune by feel. Both are refused at
-startup if non-positive, and `game_hfov` must be under 180°.
+`linear` needs nothing but `game_sens`. `projective` additionally needs
+`game_hfov` and `game_yaw` to match the game, or every turn is off by a fixed
+factor; `game_yaw` is the engine constant — `m_yaw` in Source-derived engines,
+`0.022` there — not something to tune by feel. Both are refused at startup if
+non-positive, and `game_hfov` must be under 180°.
 
 ### Human-flick movement
 

@@ -1263,7 +1263,7 @@ mod tests {
     #[test]
     fn the_same_physical_movement_takes_the_same_time_at_any_dpi() {
         let c = cfg();
-        let mut at = |dpi: f64| {
+        let at = |dpi: f64| {
             // A tenth of an inch of hand travel, whatever that is in counts.
             let counts = 0.1 * dpi;
             let mut st = SmoothMover::new(c, 4_000_000, dpi);

@@ -63,14 +63,13 @@ pub struct Optics {
     pub yaw: f64,
     /// The in-game sensitivity setting, as typed into the game.
     pub sens: f64,
-    /// Measured correction, applied last.
+    /// Correction on top of [`Self::yaw`], applied last.
     ///
-    /// `game_yaw` defaults to a value out of a reference snippet and cannot
-    /// be verified from here; getting it wrong scales every turn by a fixed
-    /// factor. This is the one number that can be measured in the game
-    /// actually being played: halve it while the aim sails past, double it
-    /// while the aim falls short, and the value it settles on *is* the
-    /// measurement.
+    /// `1` for the game this was calibrated against, since its `game_yaw` is
+    /// the measured one. Another game whose yaw constant is not known can
+    /// leave `game_yaw` alone and bisect this instead: halve it while the aim
+    /// sails past, double it while the aim falls short, and the value it
+    /// settles on is the ratio between the two games' constants.
     pub scale: f64,
 }
 
@@ -531,7 +530,7 @@ fn default_game_hfov() -> f64 {
     103.
 }
 fn default_game_yaw() -> f64 {
-    0.07
+    1.
 }
 fn default_aim_scale() -> f64 {
     1.
@@ -673,10 +672,13 @@ pub struct Config {
     /// Degrees of view rotation one mouse count is worth at sensitivity 1 —
     /// the engine's own constant (`m_yaw` in Source-derived engines). Must
     /// match the game; getting it wrong scales every turn by a fixed factor.
+    ///
+    /// The default of `1` was measured in game rather than looked up: one
+    /// count turns [`Self::game_sens`] degrees, so `deg_per_count == sens`.
     #[serde(default = "default_game_yaw")]
     pub game_yaw: f64,
-    /// Measured multiplier on every move; see [`Optics::scale`]. Start at `1`
-    /// and halve or double it in game until the aim lands.
+    /// Correction on top of [`Self::game_yaw`]; see [`Optics::scale`]. `1`
+    /// unless the game's yaw constant differs from the measured default.
     #[serde(default = "default_aim_scale")]
     pub aim_scale: f64,
 
@@ -1071,6 +1073,46 @@ aim_mode = "horizon"
         let (bx, by) = mouse_counts((137., -42.), quarter);
         assert!((bx - ax * 0.25).abs() < 1e-9, "{bx} vs {ax}");
         assert!((by - ay * 0.25).abs() < 1e-9, "{by} vs {ay}");
+    }
+
+    /// `game_yaw` was measured in game: one count turns `game_sens` degrees,
+    /// which is `yaw == 1`. It replaced a looked-up `0.07` that needed
+    /// `aim_scale = 0.07` to cancel it back out. Both say the same thing, and
+    /// this pins that they do — the measurement is the reason for the
+    /// default, so it should fail loudly if someone changes it back.
+    #[test]
+    fn the_measured_yaw_and_the_scale_that_cancelled_it_agree() {
+        let measured = Optics {
+            yaw: 1.0,
+            scale: 1.0,
+            ..optics(0.38)
+        };
+        let cancelled = Optics {
+            yaw: 0.07,
+            scale: 0.07,
+            ..optics(0.38)
+        };
+        for px in [10.0f32, 35., 50., 200.] {
+            let a = mouse_counts((px, 0.), measured);
+            let b = mouse_counts((px, 0.), cancelled);
+            assert!(
+                (a.0 - b.0).abs() <= 1e-9 * a.0.abs(),
+                "{px} px: {a:?} vs {b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_count_turns_the_sensitivity_in_degrees_by_default() {
+        let config = Config::parse(&with(&format!("game_sens = 0.38\n{TWO_PROFILES}"))).unwrap();
+        assert_eq!(config.game_yaw, 1.);
+        assert_eq!(config.aim_scale, 1.);
+        let per_count = config.optics().deg_per_count();
+        assert!(
+            (per_count - config.game_sens).abs() < 1e-12,
+            "{per_count} vs {}",
+            config.game_sens
+        );
     }
 
     #[test]

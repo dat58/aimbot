@@ -491,22 +491,22 @@ predict how a setting will feel before trying it.
    So inside a tight `fov` the projection is very nearly linear — if aim is
    off at 50 px it is the constant, not the curve.
 
-   ⚠️ **`game_yaw` is a constant this repo cannot verify.** The default comes
-   out of a reference snippet, and a wrong value scales every turn by a fixed
-   factor. `aim_scale` is the measured correction for exactly that — see
+   `game_yaw = 1.0` was **measured in game**, not looked up: one mouse count
+   turns `game_sens` degrees, so `deg_per_count == game_sens`. A different
+   game with a different yaw constant leaves that alone and bisects
+   `aim_scale` instead — see
    [Calibrating aim_scale](#calibrating-aim_scale).
 
 ### Calibrating `aim_scale`
 
-`aim_scale` multiplies whatever the model produces, last. It is the one
-number here that can be established in the game actually being played rather
-than looked up, so get it right before touching anything else — no smooth
-setting compensates for a turn that is three times too far.
+`aim_scale` multiplies the turn, last. The shipped `game_yaw = 1.0` was
+measured against one game; `aim_scale` is how another game's yaw constant
+gets absorbed without touching the model. Get it right before anything else —
+no smooth setting compensates for a turn that is a third too far.
 
-Bisect it. Pick a profile with `mover = "direct"` so nothing else is between
-the number and the mouse, stand still, and hold the trigger on a target.
-A good starting guess is well under `1.0`: the shipped `game_yaw` is almost
-certainly wrong for your game.
+Bisect it. Pick a profile with `mover = "direct"` so nothing else sits
+between the number and the mouse, stand still, and hold the trigger on a
+target.
 
 | What the aim does | What to do |
 | --- | --- |
@@ -515,9 +515,18 @@ certainly wrong for your game.
 | Overshoots a little | Multiply by about 0.8 |
 | Lands, then jitters | It is right; go tune the mover |
 
-Four or five rounds is usually enough. Starting from `1.0` and ending at,
-say, `0.3` tells you the real constant is about a third of what the model
-assumed — worth writing in the config next to the value.
+Four or five rounds is usually enough. The value it settles on is the ratio
+between your game's yaw constant and the shipped one, so it is worth writing
+into `game_yaw` once you have it and putting `aim_scale` back to `1.0`.
+
+**If the aim is accurate at a small `fov` and wanders at a larger one, that
+is a constant scale error, not a curve.** The projection's own bend is 0.07%
+at 35 px and 0.14% at 50 px — far too small to notice. What does show is that
+a fixed relative error becomes a bigger *absolute* one the further the aim
+travels. This repo's own history is the worked example: the pixel-proportional
+formula it started with over-turned by 27.9%, which is 9.8 px past the target
+at `fov = 35` and 14.0 px at `fov = 50` — against a dead zone of about 2.5 px,
+the difference between "slightly off" and "swinging".
 
 3. **Ballistic gain.** The flick commits to `move_smooth_gain` of that, ±4.5%.
    A share `move_smooth_overshoot_p` of flicks overshoot to about 106% instead.
@@ -928,7 +937,7 @@ CPU build no longer needs TensorRT settings to start.
 | `default_aim_mode` | unset | `0` head, `1` neck, `2` chest, `3` abdomen, `4` horizon |
 | `game_sens` | `1.0` | In-game sensitivity, exactly as typed into the game |
 | `game_hfov` | `103.0` | Horizontal field of view in degrees |
-| `game_yaw` | `0.07` | Degrees of view rotation per mouse count at sensitivity 1 — the engine's own constant |
+| `game_yaw` | `1.0` | Degrees of view rotation per mouse count at sensitivity 1 — the engine's own constant. The default was measured, not looked up |
 | `aim_scale` | `1.0` | Measured multiplier on every move; see [Calibrating aim_scale](#calibrating-aim_scale) |
 | `RUST_LOG` (env) | `info` | e.g. `info,aimbot=debug` for per-stage timings |
 
@@ -1013,15 +1022,15 @@ neither is a fact about the mouse:
 | `game_sens` | `1.0` | In-game sensitivity, exactly as typed into the game |
 | `aim_scale` | `1.0` | Measured multiplier on every move. **Calibrate this first**; see [Calibrating aim_scale](#calibrating-aim_scale) |
 | `game_hfov` | `103.0` | Horizontal field of view in degrees |
-| `game_yaw` | `0.07` | Degrees of view rotation per count at sensitivity 1 |
+| `game_yaw` | `1.0` | Degrees of view rotation per count at sensitivity 1 |
 | `esp_port` | unset | Serial port of the ESP button board |
 
 `game_hfov` is a game setting you can read off. `game_yaw` is the engine
-constant — `m_yaw` in Source-derived engines, `0.022` there — not something to
-tune by feel, and the `0.07` default comes out of a reference snippet rather
-than from this game. Where it is wrong, `aim_scale` absorbs the difference.
-All are refused at startup if non-positive, and `game_hfov` must be under
-180°.
+constant — `m_yaw` in Source-derived engines, `0.022` there. The `1.0` default
+is measured rather than looked up: in the game this was calibrated against,
+one count turns `game_sens` degrees. Where another game differs, `aim_scale`
+absorbs it. All are refused at startup if non-positive, and `game_hfov` must
+be under 180°.
 
 ### Human-flick movement
 

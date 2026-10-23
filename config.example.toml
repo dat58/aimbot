@@ -42,10 +42,10 @@ game_sens = 0.38
 # FOV ngang của game, độ.
 game_hfov = 103.0
 # Độ xoay mỗi count ở sensitivity 1 — hằng số của engine.
-game_yaw = 0.07
-# Hệ số đo được, nhân cuối cùng lên mọi cú move. game_yaw lấy từ
-# game khác nên gần như chắc chắn sai; đây là số chỉnh được bằng
-# cách thử trong chính game của bạn. Xem README.
+# 1.0 là giá trị ĐO ĐƯỢC trong game: mỗi count xoay đúng game_sens độ.
+game_yaw = 1.0
+# Hệ số bù thêm, nhân cuối cùng. Để 1.0 trừ khi game của bạn có
+# hằng số yaw khác. Xem mục Calibrating aim_scale trong README.
 aim_scale = 1.0
 
 default_aim_mode = 4

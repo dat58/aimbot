@@ -39,15 +39,14 @@ openvino_device_type = "CPU"
 intra_threads = 1
 
 game_sens = 0.38
-# linear = hằng số fit sẵn, chỉ cần game_sens.
-# projective = phép chiếu camera, cần thêm game_hfov + game_yaw.
-aim_model = "linear"
-# Hệ số đo được, nhân cuối cùng lên mọi cú move.
-# Hằng số trong cả hai mô hình đều lấy từ game khác, nên đây là
-# số duy nhất chỉnh được bằng cách thử trong chính game của bạn.
+# FOV ngang của game, độ.
+game_hfov = 103.0
+# Độ xoay mỗi count ở sensitivity 1 — hằng số của engine.
+game_yaw = 0.07
+# Hệ số đo được, nhân cuối cùng lên mọi cú move. game_yaw lấy từ
+# game khác nên gần như chắc chắn sai; đây là số chỉnh được bằng
+# cách thử trong chính game của bạn. Xem README.
 aim_scale = 1.0
-# game_hfov = 103.0
-# game_yaw = 0.07
 
 default_aim_mode = 4
 

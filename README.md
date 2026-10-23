@@ -457,49 +457,43 @@ predict how a setting will feel before trying it.
    or half its larger side when the crosshair is level with a head box, times
    the same `scale_min_zone`.
 
-2. **Size, in mouse counts.** `aim_model` picks the relation.
-
-   **`linear`** (the default) is one constant fitted in game, normalised to a
-   1920-wide reference:
+2. **Size, in mouse counts.** Pixels are a perspective projection of the view
+   angle, so the relation is an arctangent rather than a scale factor:
 
    ```text
-   counts = dist × (1920 / screen_width) × 1.07437623 × game_sens^-0.9936827126
-   ```
-
-   It needs no field of view and no engine yaw constant, which is why it is
-   the default — those are two more things to get wrong.
-
-   **`projective`** goes through the camera instead:
-
-   ```text
-   focal  = (screen_width / 2) / tan(game_hfov / 2)
+   focal  = (frame_width / 2) / tan(game_hfov / 2)
    turn   = atan2(dist, focal)                  # degrees of view rotation
-   counts = turn / (game_yaw × game_sens)
+   counts = turn / (game_yaw × game_sens) × aim_scale
    ```
 
    The pitch uses `atan2(dy, hypot(focal, dx))` rather than `atan2(dy, focal)`,
    because it is measured off the already-yawed ray.
 
-   The two agree to about a percent over sensitivities 0.25–2 at offsets up to
-   100 px, and part company further out: at a 103° field of view a target
-   800 px out is **1.68×** the turn of one 400 px out under `projective`, and
-   exactly 2× under `linear`. The fitted constant `1.07437623` *is* the
-   projection linearised — `degrees(atan(1/focal)) / 0.07` at 1920 px and 103°
-   comes out at 1.0719.
+   `dist` is in frame pixels and the focal length comes from `frame_width`,
+   which is the space it is measured in and which covers the whole field of
+   view.
 
-   Both normalise by `frame_width`, which is the space `dist` is measured in
-   and which covers the whole field of view.
-
-   **The mouse's DPI is in neither and must not be.** The game never sees it:
+   **The mouse's DPI is not in this and must not be.** The game never sees it:
    it receives counts and converts them itself. DPI only decides how much
    *hand travel* a count is worth, which is why its one use is the speed
    envelope below.
 
-   ⚠️ **Both carry a constant taken from a different game**, and neither can
-   be verified without playing yours. `1.07437623` was fitted in the engine
-   this was ported from; `game_yaw = 0.07` comes out of a reference snippet.
-   A wrong constant scales every turn by a fixed factor. `aim_scale` is the
-   measured correction for exactly that — see
+   The bend is small close in and only matters further out. At a 103° field of
+   view and a 1920-wide frame:
+
+   | `dist` | compression against a straight line |
+   | --- | --- |
+   | 35 px | 0.07% |
+   | 50 px | 0.14% |
+   | 200 px | 2.2% |
+   | 800 px | 23% |
+
+   So inside a tight `fov` the projection is very nearly linear — if aim is
+   off at 50 px it is the constant, not the curve.
+
+   ⚠️ **`game_yaw` is a constant this repo cannot verify.** The default comes
+   out of a reference snippet, and a wrong value scales every turn by a fixed
+   factor. `aim_scale` is the measured correction for exactly that — see
    [Calibrating aim_scale](#calibrating-aim_scale).
 
 ### Calibrating `aim_scale`
@@ -510,7 +504,9 @@ than looked up, so get it right before touching anything else — no smooth
 setting compensates for a turn that is three times too far.
 
 Bisect it. Pick a profile with `mover = "direct"` so nothing else is between
-the number and the mouse, stand still, and hold the trigger on a target:
+the number and the mouse, stand still, and hold the trigger on a target.
+A good starting guess is well under `1.0`: the shipped `game_yaw` is almost
+certainly wrong for your game.
 
 | What the aim does | What to do |
 | --- | --- |
@@ -857,12 +853,13 @@ every strafing target.
 
 ### Tuning procedure
 
-1. **Calibrate `aim_scale` first**, with `game_sens` set to what the game
-   says; see [Calibrating aim_scale](#calibrating-aim_scale). Every flick is
-   sized in counts derived from these, so a wrong value makes each one the
-   wrong size and no smooth setting can compensate. `[mouse].dpi` matters too,
-   but only for the speed envelope — it does not change how far a flick goes.
-   All must be above zero; startup fails otherwise.
+1. **Calibrate `aim_scale` first**, with `game_sens` and `game_hfov` set to
+   what the game says; see
+   [Calibrating aim_scale](#calibrating-aim_scale). Every flick is sized in
+   counts derived from these, so a wrong value makes each one the wrong size
+   and no smooth setting can compensate. `[mouse].dpi` matters too, but only
+   for the speed envelope — it does not change how far a flick goes. All must
+   be above zero; startup fails otherwise.
 2. **Pick a preset from your fov.**
 3. **Check the device keeps up.** Run `mouse_test`, type `s` at the `dx`
    prompt to switch paths, and compare the planned duration with the measured
@@ -930,9 +927,8 @@ CPU build no longer needs TensorRT settings to start.
 | `intra_threads` | `1` | ONNX Runtime intra-op threads |
 | `default_aim_mode` | unset | `0` head, `1` neck, `2` chest, `3` abdomen, `4` horizon |
 | `game_sens` | `1.0` | In-game sensitivity, exactly as typed into the game |
-| `game_hfov` | `103.0` | Horizontal field of view in degrees. Read only by `aim_model = "projective"` |
-| `game_yaw` | `0.07` | Degrees of view rotation per mouse count at sensitivity 1 — the engine's own constant. Read only by `aim_model = "projective"` |
-| `aim_model` | `linear` | `linear` for the fitted constant, `projective` for the camera projection |
+| `game_hfov` | `103.0` | Horizontal field of view in degrees |
+| `game_yaw` | `0.07` | Degrees of view rotation per mouse count at sensitivity 1 — the engine's own constant |
 | `aim_scale` | `1.0` | Measured multiplier on every move; see [Calibrating aim_scale](#calibrating-aim_scale) |
 | `RUST_LOG` (env) | `info` | e.g. `info,aimbot=debug` for per-stage timings |
 
@@ -1015,17 +1011,17 @@ neither is a fact about the mouse:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `game_sens` | `1.0` | In-game sensitivity, exactly as typed into the game |
-| `aim_model` | `linear` | `linear` or `projective`; see [Mouse movement](#from-a-detection-to-a-flick) |
 | `aim_scale` | `1.0` | Measured multiplier on every move. **Calibrate this first**; see [Calibrating aim_scale](#calibrating-aim_scale) |
-| `game_hfov` | `103.0` | Horizontal field of view in degrees. `projective` only |
-| `game_yaw` | `0.07` | Degrees of view rotation per count at sensitivity 1. `projective` only |
+| `game_hfov` | `103.0` | Horizontal field of view in degrees |
+| `game_yaw` | `0.07` | Degrees of view rotation per count at sensitivity 1 |
 | `esp_port` | unset | Serial port of the ESP button board |
 
-`linear` needs nothing but `game_sens`. `projective` additionally needs
-`game_hfov` and `game_yaw` to match the game, or every turn is off by a fixed
-factor; `game_yaw` is the engine constant — `m_yaw` in Source-derived engines,
-`0.022` there — not something to tune by feel. Both are refused at startup if
-non-positive, and `game_hfov` must be under 180°.
+`game_hfov` is a game setting you can read off. `game_yaw` is the engine
+constant — `m_yaw` in Source-derived engines, `0.022` there — not something to
+tune by feel, and the `0.07` default comes out of a reference snippet rather
+than from this game. Where it is wrong, `aim_scale` absorbs the difference.
+All are refused at startup if non-positive, and `game_hfov` must be under
+180°.
 
 ### Human-flick movement
 

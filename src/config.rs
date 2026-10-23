@@ -44,36 +44,6 @@ pub fn frame_geometry(
     (frame, scale)
 }
 
-/// Width the linear model's constant was fitted at, and the width the
-/// projective model's focal length is derived from.
-pub const REF_WIDTH: f64 = 1920.;
-/// Counts per reference pixel at sensitivity 1, fitted in-game.
-pub const LINEAR_K: f64 = 1.07437623;
-/// Exponent of the fitted sensitivity curve. Within a percent of `-1`, which
-/// is what the physics says it should be.
-pub const LINEAR_EXP: f64 = -0.9936827126;
-/// Sensitivities the fit is valid over.
-pub const SENS_CLAMP: (f64, f64) = (0.01, 10.);
-
-/// How a pixel offset is turned into a turn.
-///
-/// The two agree to about a percent over sensitivities 0.25-2 and offsets up
-/// to 100 px — worst measured 1.23%, at sensitivity 2 and 100 px — and only
-/// part company further out, where [`AimModel::Projective`] bends and
-/// [`AimModel::Linear`] does not.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AimModel {
-    /// One fitted constant over the sensitivity, normalised to a 1920-wide
-    /// reference. Needs no field of view and no engine yaw constant, which is
-    /// why it is the default: those are two more things to get wrong.
-    #[default]
-    Linear,
-    /// The pinhole projection. Physically the honest one, and it needs
-    /// [`Config::game_hfov`] and [`Config::game_yaw`] to match the game.
-    Projective,
-}
-
 /// How the game turns mouse counts into a view rotation.
 ///
 /// Everything here is a fact about the game, not about the mouse. The mouse's
@@ -82,7 +52,6 @@ pub enum AimModel {
 /// given turn is worth cannot depend on the hardware.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Optics {
-    pub model: AimModel,
     /// Width of the space the delta is measured in — the frame, which covers
     /// the whole screen and therefore the whole field of view. Both models
     /// normalise by it, and they only agree with each other when they use the
@@ -94,15 +63,14 @@ pub struct Optics {
     pub yaw: f64,
     /// The in-game sensitivity setting, as typed into the game.
     pub sens: f64,
-    /// Measured correction on top of whichever model, applied last.
+    /// Measured correction, applied last.
     ///
-    /// Both models carry a constant taken from a *different* game —
-    /// [`LINEAR_K`] was fitted elsewhere, and `game_yaw` defaults to a value
-    /// out of a reference snippet. Neither can be verified from here, and
-    /// getting either wrong scales every turn by a fixed factor. This is the
-    /// one number that can be measured in the game actually being played:
-    /// halve it while the aim sails past, double it while the aim falls
-    /// short, and the value it settles on *is* the measurement.
+    /// `game_yaw` defaults to a value out of a reference snippet and cannot
+    /// be verified from here; getting it wrong scales every turn by a fixed
+    /// factor. This is the one number that can be measured in the game
+    /// actually being played: halve it while the aim sails past, double it
+    /// while the aim falls short, and the value it settles on *is* the
+    /// measurement.
     pub scale: f64,
 }
 
@@ -117,25 +85,18 @@ impl Optics {
         self.yaw * self.sens
     }
 
-    /// Counts per pixel for [`AimModel::Linear`], before [`Self::scale`].
-    pub fn linear_scale(&self) -> f64 {
-        let sens = self.sens.clamp(SENS_CLAMP.0, SENS_CLAMP.1);
-        REF_WIDTH / self.width * LINEAR_K * sens.powf(LINEAR_EXP)
-    }
 }
 
 /// Mouse counts for a target `frame_delta` pixels from the crosshair.
 ///
-/// Which relation is used is [`Optics::model`]'s to decide. Neither involves
-/// `mouse.dpi`: the game never sees it, so how many counts a turn is worth
-/// cannot depend on the hardware. Its one legitimate use is the hand-speed
-/// envelope in [`crate::mouse::mover::smooth`].
+/// Pixels are a perspective projection of the view angle, so the relation is
+/// an arctangent rather than a scale factor. The bend is small close in — at
+/// a 103° field of view and a 1920-wide frame it is 0.14% at 50 px — and only
+/// becomes significant further out: 2.2% at 200 px, 23% at 800 px.
 ///
-/// [`AimModel::Linear`] is one fitted constant over the sensitivity.
-/// [`AimModel::Projective`] goes through the camera, so it bends: at a 103°
-/// field of view a target 800 px out is 1.68 times the turn of one 400 px
-/// out, not 2. Inside a typical `fov` the two stay within about a percent of
-/// each other — the bend only shows on long flicks.
+/// `mouse.dpi` is deliberately absent. The game never sees it, so how many
+/// counts a turn is worth cannot depend on the hardware; its one legitimate
+/// use is the hand-speed envelope in [`crate::mouse::mover::smooth`].
 ///
 /// # Which width, and why `aim_scale` exists
 ///
@@ -144,33 +105,25 @@ impl Optics {
 /// screen, so the frame spans the whole field of view, and the projection
 /// only cares that the delta and the width describe the same space.
 ///
-/// What neither model can get right on its own is the *constant*. The linear
-/// fit was taken in another game and `game_yaw` defaults to a value out of a
-/// reference snippet; both scale every turn by a fixed factor when they do
-/// not match. [`Optics::scale`] is the measured correction for exactly that,
-/// and it is the only one of these numbers that can be established in the
-/// game being played rather than looked up.
+/// What the projection cannot supply is the *constant*. `game_yaw` has to
+/// match the engine, and a wrong value scales every turn by a fixed factor.
+/// [`Optics::scale`] is the measured correction for exactly that, and it is
+/// the only number here that can be established in the game being played
+/// rather than looked up.
 pub fn mouse_counts(frame_delta: (f32, f32), optics: Optics) -> (f64, f64) {
     let dx = frame_delta.0 as f64;
     let dy = frame_delta.1 as f64;
-    let (cx, cy) = match optics.model {
-        AimModel::Linear => {
-            let scale = optics.linear_scale();
-            (dx * scale, dy * scale)
-        }
-        AimModel::Projective => {
-            let focal = optics.focal();
-            let yaw_deg = dx.atan2(focal).to_degrees();
-            // The pitch is measured off the already-yawed ray, so its lever
-            // arm is `hypot(focal, dx)` rather than `focal`. Using `focal`
-            // would under-rotate y for any target also off centre
-            // horizontally.
-            let pitch_deg = dy.atan2(focal.hypot(dx)).to_degrees();
-            let deg_per_count = optics.deg_per_count();
-            (yaw_deg / deg_per_count, pitch_deg / deg_per_count)
-        }
-    };
-    (cx * optics.scale, cy * optics.scale)
+    let focal = optics.focal();
+    let yaw_deg = dx.atan2(focal).to_degrees();
+    // The pitch is measured off the already-yawed ray, so its lever arm is
+    // `hypot(focal, dx)` rather than `focal`. Using `focal` would
+    // under-rotate y for any target also off centre horizontally.
+    let pitch_deg = dy.atan2(focal.hypot(dx)).to_degrees();
+    let deg_per_count = optics.deg_per_count();
+    (
+        yaw_deg / deg_per_count * optics.scale,
+        pitch_deg / deg_per_count * optics.scale,
+    )
 }
 
 /// Report cadence for the smooth-aim playback, derived from the link speed.
@@ -722,10 +675,6 @@ pub struct Config {
     /// match the game; getting it wrong scales every turn by a fixed factor.
     #[serde(default = "default_game_yaw")]
     pub game_yaw: f64,
-    /// Which relation turns pixels into counts; see [`AimModel`]. `game_hfov`
-    /// and `game_yaw` are read only by `projective`.
-    #[serde(default)]
-    pub aim_model: AimModel,
     /// Measured multiplier on every move; see [`Optics::scale`]. Start at `1`
     /// and halve or double it in game until the aim lands.
     #[serde(default = "default_aim_scale")]
@@ -847,7 +796,6 @@ impl Config {
     /// the frame geometry.
     pub fn optics(&self) -> Optics {
         Optics {
-            model: self.aim_model,
             width: self.frame_width as f64,
             hfov: self.game_hfov,
             yaw: self.game_yaw,
@@ -1105,7 +1053,6 @@ aim_mode = "horizon"
 
     fn optics(sens: f64) -> Optics {
         Optics {
-            model: AimModel::Projective,
             width: 1920.,
             hfov: 103.,
             yaw: 0.07,
@@ -1115,19 +1062,15 @@ aim_mode = "horizon"
     }
 
     /// The one knob that can be measured in the game actually being played,
-    /// so it has to reach both models and nothing else may swallow it.
+    /// so nothing may swallow it.
     #[test]
-    fn aim_scale_multiplies_whichever_model_is_in_use() {
-        for model in [AimModel::Linear, AimModel::Projective] {
-            let mut one = optics(0.38);
-            one.model = model;
-            let mut quarter = one;
-            quarter.scale = 0.25;
-            let (ax, ay) = mouse_counts((137., -42.), one);
-            let (bx, by) = mouse_counts((137., -42.), quarter);
-            assert!((bx - ax * 0.25).abs() < 1e-9, "{model:?}: {bx} vs {ax}");
-            assert!((by - ay * 0.25).abs() < 1e-9, "{model:?}: {by} vs {ay}");
-        }
+    fn aim_scale_multiplies_every_move() {
+        let one = optics(0.38);
+        let quarter = Optics { scale: 0.25, ..one };
+        let (ax, ay) = mouse_counts((137., -42.), one);
+        let (bx, by) = mouse_counts((137., -42.), quarter);
+        assert!((bx - ax * 0.25).abs() < 1e-9, "{bx} vs {ax}");
+        assert!((by - ay * 0.25).abs() < 1e-9, "{by} vs {ay}");
     }
 
     #[test]
@@ -1135,71 +1078,6 @@ aim_mode = "horizon"
         for bad in ["aim_scale = 0.0", "aim_scale = -2.0"] {
             let src = with(&format!("{bad}\n{TWO_PROFILES}"));
             assert!(Config::parse(&src).is_err(), "{bad} was accepted");
-        }
-    }
-
-    fn linear(sens: f64, width: f64) -> Optics {
-        Optics {
-            model: AimModel::Linear,
-            width,
-            sens,
-            ..optics(sens)
-        }
-    }
-
-    /// Reference values from the implementation this is ported from:
-    /// `capture_px × (1920 / monitor_width) × 1.07437623 × sens^-0.9936827126`.
-    #[test]
-    fn the_linear_model_matches_its_reference_fit() {
-        for (delta, sens, width, want) in [
-            ((100.0f32, 0.0f32), 2.0, 1920., 53.9545517204),
-            ((30., 0.), 1.5, 1920., 21.5426341466),
-            ((20., 0.), 0.38, 1920., 56.2015330751),
-            ((100., 0.), 0.38, 2560., 210.7557490317),
-            ((1., 0.), 1.0, 1920., 1.0743762300),
-        ] {
-            let (dx, _) = mouse_counts(delta, linear(sens, width));
-            assert!((dx - want).abs() < 1e-6, "{delta:?} @ {sens}: {dx} vs {want}");
-        }
-    }
-
-    /// The fit is only valid over the sensitivities it was taken at, and
-    /// `powf` of a wild value would otherwise send the aim to the moon.
-    #[test]
-    fn the_linear_model_clamps_the_sensitivity_to_its_fitted_range() {
-        let px = (10.0f32, 0.0f32);
-        assert_eq!(
-            mouse_counts(px, linear(0.001, 1920.)),
-            mouse_counts(px, linear(SENS_CLAMP.0, 1920.))
-        );
-        assert_eq!(
-            mouse_counts(px, linear(99., 1920.)),
-            mouse_counts(px, linear(SENS_CLAMP.1, 1920.))
-        );
-    }
-
-    /// The fitted constant is the projection linearised: both describe the
-    /// same camera, so inside a typical `fov` they have to agree. They only
-    /// part company further out, where one bends and the other does not.
-    #[test]
-    fn the_two_models_agree_near_the_centre_and_diverge_far_from_it() {
-        for sens in [0.25f64, 0.38, 1.0, 2.0] {
-            for px in [5.0f32, 20., 50., 100.] {
-                let a = mouse_counts((px, 0.), linear(sens, 1920.)).0;
-                let b = mouse_counts((px, 0.), optics(sens)).0;
-                // Worst measured over this grid is 1.23%, at sensitivity 2
-                // and 100 px: the fitted sensitivity curve and the projection
-                // are not the same function, only close over the range that
-                // matters.
-                assert!(
-                    (a - b).abs() <= 0.02 * a,
-                    "{px} px @ {sens}: linear {a}, projective {b}"
-                );
-            }
-            // Far out the projection bends away and the fit does not follow.
-            let a = mouse_counts((800., 0.), linear(sens, 1920.)).0;
-            let b = mouse_counts((800., 0.), optics(sens)).0;
-            assert!(b < 0.8 * a, "{sens}: linear {a}, projective {b}");
         }
     }
 
@@ -1268,7 +1146,6 @@ aim_mode = "horizon"
     fn the_projection_is_free_of_the_pixel_space_when_both_sides_agree() {
         let (frame, scale) = frame_geometry("elgato://", (2560, 1440), (1920, 1080));
         let in_frame = Optics {
-            model: AimModel::Projective,
             width: frame.0 as f64,
             hfov: 103.,
             yaw: 0.07,
